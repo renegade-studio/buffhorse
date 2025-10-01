@@ -39,6 +39,7 @@ export const CLIENT_ACTION_SCHEMA = z.discriminatedUnion('type', [
     sessionState: SessionStateSchema,
     toolResults: z.array(toolResultPartSchema),
     model: z.string().optional(),
+    provider: z.string().optional(),
     repoUrl: z.string().optional(),
     agentId: z.string().optional(),
   }),

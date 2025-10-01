@@ -57,6 +57,13 @@ export const cliOptions: CliParam[] = [
     hidden: true,
   },
   {
+    flags: '--provider <provider>',
+    description:
+      'Specify the AI provider to use (e.g., "anthropic", "google", "openai"). Defaults to OpenRouter.',
+    menuDescription: 'Specify the AI provider (e.g., "anthropic")',
+    hidden: false,
+  },
+  {
     flags: '--lite',
     description: 'Use budget models & fetch fewer files',
     menuDescription: 'Use budget models & fetch fewer files (faster)',
