@@ -198,6 +198,7 @@ interface ClientOptions {
   costMode: CostMode
   git: GitCommand
   model: string | undefined
+  provider?: string
 }
 
 export class Client {
@@ -228,6 +229,7 @@ export class Client {
   public storedApiKeyTypes: ApiKeyType[] = []
   public lastToolResults: ToolResultPart[] = []
   public model: string | undefined
+  public provider: string | undefined
   public oneTimeFlags: Record<(typeof ONE_TIME_LABELS)[number], boolean> =
     Object.fromEntries(ONE_TIME_LABELS.map((tag) => [tag, false])) as Record<
       (typeof ONE_TIME_LABELS)[number],
@@ -244,9 +246,11 @@ export class Client {
     reconnectWhenNextIdle,
     costMode,
     model,
+    provider,
   }: ClientOptions) {
     this.costMode = costMode
     this.model = model
+    this.provider = provider
     this.webSocket = new APIRealtimeClient(
       websocketUrl,
       onWebSocketError,
@@ -1214,6 +1218,7 @@ export class Client {
       authToken: process.env[API_KEY_ENV_VAR] || this.user?.authToken,
       costMode: this.costMode,
       model: this.model,
+      provider: this.provider,
       repoUrl: loggerContext.repoUrl,
       // repoName: loggerContext.repoName,
     }

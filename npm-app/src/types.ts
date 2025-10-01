@@ -8,6 +8,7 @@ export interface CliOptions {
   costMode: CostMode
   runInitFlow?: boolean
   model?: string
+  provider?: string
   agent?: string
   params?: Record<string, any>
   print?: boolean
