@@ -1,9 +1,7 @@
-import { ASYNC_AGENTS_ENABLED } from '@codebuff/common/old-constants'
 import { CLIENT_MESSAGE_SCHEMA } from '@codebuff/common/websockets/websocket-schema'
 import { isError } from 'lodash'
 import { WebSocketServer } from 'ws'
 
-import { asyncAgentManager } from '../async-agent-manager'
 import { setSessionConnected } from '../live-user-inputs'
 import { Switchboard } from './switchboard'
 import { onWebsocketAction } from './websocket-action'
@@ -82,7 +80,8 @@ async function processMessage(
   }
 }
 
-export function listen(server: HttpServer, path: string) {
+export function listen(params: { server: HttpServer; path: string }) {
+  const { server, path } = params
   const wss = new WebSocketServer({ server, path })
   let deadConnectionCleaner: NodeJS.Timeout | undefined
   wss.on('listening', () => {
@@ -142,11 +141,6 @@ export function listen(server: HttpServer, path: string) {
 
       // Mark session as disconnected to stop all agents
       setSessionConnected(clientSessionId, false)
-
-      if (ASYNC_AGENTS_ENABLED) {
-        // Cleanup async agents for this session
-        asyncAgentManager.cleanupSession(clientSessionId)
-      }
 
       SWITCHBOARD.disconnect(ws)
     })

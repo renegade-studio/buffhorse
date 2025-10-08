@@ -72,7 +72,7 @@ app.use(
 )
 
 // Initialize BigQuery before starting the server
-setupBigQuery().catch((err) => {
+setupBigQuery({ logger }).catch((err) => {
   logger.error(
     {
       error: err,
@@ -86,7 +86,7 @@ setupBigQuery().catch((err) => {
   )
 })
 
-initAnalytics()
+initAnalytics({ logger })
 
 const server = http.createServer(app)
 
@@ -94,7 +94,7 @@ server.listen(port, () => {
   logger.debug(`🚀 Server is running on port ${port}`)
   console.log(`🚀 Server is running on port ${port}`)
 })
-webSocketListen(server, '/ws')
+webSocketListen({ server, path: '/ws' })
 
 let shutdownInProgress = false
 // Graceful shutdown handler for both SIGTERM and SIGINT

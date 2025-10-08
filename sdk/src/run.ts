@@ -1,5 +1,7 @@
 import path from 'path'
 
+import { cloneDeep } from 'lodash'
+
 import { initialSessionState, applyOverridesToSessionState } from './run-state'
 import { changeFile } from './tools/change-file'
 import { codeSearch } from './tools/code-search'
@@ -7,6 +9,7 @@ import { getFiles } from './tools/read-files'
 import { runTerminalCommand } from './tools/run-terminal-command'
 import { WebSocketHandler } from './websocket-client'
 import { PromptResponseSchema } from '../../common/src/actions'
+import { MAX_AGENT_STEPS_DEFAULT } from '../../common/src/constants/agents'
 import { toolNames } from '../../common/src/tools/constants'
 import { clientToolCallSchema } from '../../common/src/tools/list'
 
@@ -29,8 +32,10 @@ import type {
   ToolResultPart,
 } from '../../common/src/types/messages/content-part'
 import type { PrintModeEvent } from '../../common/src/types/print-mode'
-import type { SessionState } from '../../common/src/types/session-state'
-import { MAX_AGENT_STEPS_DEFAULT } from '../../common/src/constants/agents'
+import {
+  AgentOutputSchema,
+  type SessionState,
+} from '../../common/src/types/session-state'
 
 export type CodebuffClientOptions = {
   // Provide an API key or set the CODEBUFF_API_KEY environment variable.
@@ -42,8 +47,8 @@ export type CodebuffClientOptions = {
   agentDefinitions?: AgentDefinition[]
   maxAgentSteps?: number
 
-  handleEvent?: (event: PrintModeEvent) => void
-  handleStreamChunk?: (chunk: string) => void
+  handleEvent?: (event: PrintModeEvent) => void | Promise<void>
+  handleStreamChunk?: (chunk: string) => void | Promise<void>
 
   overrideTools?: Partial<
     {
@@ -61,7 +66,7 @@ export type CodebuffClientOptions = {
 }
 
 export type RunOptions = {
-  agent: string
+  agent: string | AgentDefinition
   prompt: string
   params?: Record<string, any>
   previousRun?: RunState
@@ -73,7 +78,7 @@ export async function run({
   apiKey,
   fingerprintId,
 
-  cwd = process.cwd(),
+  cwd,
   projectFiles,
   knowledgeFiles,
   agentDefinitions,
@@ -95,9 +100,9 @@ export async function run({
     apiKey: string
     fingerprintId: string
   }): Promise<RunState> {
-  function onError(error: { message: string }) {
+  async function onError(error: { message: string }) {
     if (handleEvent) {
-      handleEvent({ type: 'error', message: error.message })
+      await handleEvent({ type: 'error', message: error.message })
     }
   }
 
@@ -118,7 +123,11 @@ export async function run({
       onError({ message: error.message })
     },
     readFiles: ({ filePaths }) =>
-      readFiles({ filePaths, override: overrideTools?.read_files, cwd }),
+      readFiles({
+        filePaths,
+        override: overrideTools?.read_files,
+        cwd,
+      }),
     handleToolCall: (action) =>
       handleToolCall({
         action,
@@ -135,9 +144,9 @@ export async function run({
     onResponseChunk: async (action) => {
       const { userInputId, chunk } = action
       if (typeof chunk === 'string') {
-        handleStreamChunk?.(chunk)
+        await handleStreamChunk?.(chunk)
       } else {
-        handleEvent?.(chunk)
+        await handleEvent?.(chunk)
       }
     },
     onSubagentResponseChunk: async () => {},
@@ -159,6 +168,13 @@ export async function run({
   })
 
   // Init session state
+  let agentId
+  if (typeof agent !== 'string') {
+    agentDefinitions = [...(cloneDeep(agentDefinitions) ?? []), agent]
+    agentId = agent.id
+  } else {
+    agentId = agent
+  }
   let sessionState: SessionState
   if (previousRun?.sessionState) {
     // applyOverridesToSessionState handles deep cloning and applying any provided overrides
@@ -197,7 +213,7 @@ export async function run({
     costMode: 'normal',
     sessionState,
     toolResults: extraToolResults ?? [],
-    agentId: agent,
+    agentId,
   })
 
   const result = await promise
@@ -207,23 +223,30 @@ export async function run({
   return result
 }
 
+function requireCwd(cwd: string | undefined, toolName: string): string {
+  if (!cwd) {
+    throw new Error(
+      `cwd is required for the ${toolName} tool. Please provide cwd in CodebuffClientOptions or override the ${toolName} tool.`,
+    )
+  }
+  return cwd
+}
+
 async function readFiles({
   filePaths,
   override,
   cwd,
-}: { filePaths: string[] } & (
-  | {
-      override: NonNullable<
-        Required<CodebuffClientOptions>['overrideTools']['read_files']
-      >
-      cwd?: string
-    }
-  | { override: undefined; cwd: string }
-)) {
+}: {
+  filePaths: string[]
+  override?: NonNullable<
+    Required<CodebuffClientOptions>['overrideTools']['read_files']
+  >
+  cwd?: string
+}) {
   if (override) {
     return await override({ filePaths })
   }
-  return getFiles(filePaths, cwd)
+  return getFiles(filePaths, requireCwd(cwd, 'read_files'))
 }
 
 async function handleToolCall({
@@ -235,7 +258,7 @@ async function handleToolCall({
   action: ServerAction<'tool-call-request'>
   overrides: NonNullable<CodebuffClientOptions['overrideTools']>
   customToolDefinitions: Record<string, CustomToolDefinition>
-  cwd: string
+  cwd?: string
 }): ReturnType<WebSocketHandler['handleToolCall']> {
   const toolName = action.toolName
   const input = action.input
@@ -267,15 +290,16 @@ async function handleToolCall({
     } else if (toolName === 'end_turn') {
       result = []
     } else if (toolName === 'write_file' || toolName === 'str_replace') {
-      result = changeFile(input, cwd)
+      result = changeFile(input, requireCwd(cwd, toolName))
     } else if (toolName === 'run_terminal_command') {
+      const resolvedCwd = requireCwd(cwd, 'run_terminal_command')
       result = await runTerminalCommand({
         ...input,
-        cwd: path.resolve(cwd, input.cwd ?? '.'),
+        cwd: path.resolve(resolvedCwd, input.cwd ?? '.'),
       } as Parameters<typeof runTerminalCommand>[0])
     } else if (toolName === 'code_search') {
       result = await codeSearch({
-        projectPath: cwd,
+        projectPath: requireCwd(cwd, 'code_search'),
         ...input,
       } as Parameters<typeof codeSearch>[0])
     } else if (toolName === 'run_file_change_hooks') {
@@ -294,24 +318,22 @@ async function handleToolCall({
       )
     }
   } catch (error) {
-    return {
-      output: [
-        {
-          type: 'json',
-          value: {
-            errorMessage:
-              error &&
-              typeof error === 'object' &&
-              'message' in error &&
-              typeof error.message === 'string'
-                ? error.message
-                : typeof error === 'string'
-                  ? error
-                  : 'Unknown error',
-          },
+    result = [
+      {
+        type: 'json',
+        value: {
+          errorMessage:
+            error &&
+            typeof error === 'object' &&
+            'message' in error &&
+            typeof error.message === 'string'
+              ? error.message
+              : typeof error === 'string'
+                ? error
+                : 'Unknown error',
         },
-      ],
-    }
+      },
+    ]
   }
   return {
     output: result,
@@ -339,27 +361,23 @@ async function handlePromptResponse({
       },
     })
   } else if (action.type === 'prompt-response') {
-    const parsedAction = PromptResponseSchema.safeParse(action)
-    if (!parsedAction.success) {
+    // Stop enforcing session state schema! It's a black box we will pass back to the server.
+    // Only check the output schema.
+    const parsedOutput = AgentOutputSchema.safeParse(action.output)
+    if (!parsedOutput.success) {
       const message = [
         'Received invalid prompt response from server:',
-        JSON.stringify(parsedAction.error.issues),
+        JSON.stringify(parsedOutput.error.issues),
         'If this issues persists, please contact support@codebuff.com',
       ].join('\n')
-      onError({
-        message: message,
-      })
+      onError({ message })
       resolve({
         sessionState: initialSessionState,
-        output: {
-          type: 'error',
-          message: message,
-        },
+        output: { type: 'error', message },
       })
       return
     }
-
-    const { sessionState, output } = parsedAction.data
+    const { sessionState, output } = action
     const state: RunState = {
       sessionState,
       output: output ?? {

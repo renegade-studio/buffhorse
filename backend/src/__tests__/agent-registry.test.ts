@@ -24,6 +24,7 @@ import {
 import type { AgentTemplate } from '../templates/types'
 import type { DynamicAgentTemplate } from '@codebuff/common/types/dynamic-agent-template'
 import type { ProjectFileContext } from '@codebuff/common/util/file'
+import type { Logger } from '@codebuff/types/logger'
 
 // Create mock static templates that will be used by the agent registry
 const mockStaticTemplates: Record<string, AgentTemplate> = {
@@ -38,6 +39,7 @@ const mockStaticTemplates: Record<string, AgentTemplate> = {
     spawnableAgents: [],
     outputMode: 'last_message',
     includeMessageHistory: true,
+    inheritParentSystemPrompt: false,
     model: 'anthropic/claude-4-sonnet-20250522',
     spawnerPrompt: 'Test',
     inputSchema: {},
@@ -53,6 +55,7 @@ const mockStaticTemplates: Record<string, AgentTemplate> = {
     spawnableAgents: [],
     outputMode: 'last_message',
     includeMessageHistory: true,
+    inheritParentSystemPrompt: false,
     model: 'google/gemini-2.5-flash',
     spawnerPrompt: 'Test',
     inputSchema: {},
@@ -167,7 +170,13 @@ describe('Agent Registry', () => {
       '@codebuff/common/templates/agent-validation'
     )
     spyOn(validationModule, 'validateAgents').mockImplementation(
-      (agentTemplates: Record<string, DynamicAgentTemplate> = {}) => {
+      ({
+        agentTemplates = {},
+        logger,
+      }: {
+        agentTemplates?: Record<string, DynamicAgentTemplate>
+        logger: Logger
+      }) => {
         // Start with static templates (simulating the real behavior)
         const templates: Record<string, AgentTemplate> = {
           ...mockStaticTemplates,
@@ -192,7 +201,7 @@ describe('Agent Registry', () => {
     )
 
     spyOn(validationModule, 'validateSingleAgent').mockImplementation(
-      (template: DynamicAgentTemplate, options?: any) => {
+      ({ template }: { template: DynamicAgentTemplate; filePath?: string }) => {
         // Check for malformed agents (missing required fields)
         if (
           template.id === 'malformed-agent' ||
@@ -235,6 +244,7 @@ describe('Agent Registry', () => {
           spawnableAgents: [],
           outputMode: 'last_message',
           includeMessageHistory: true,
+          inheritParentSystemPrompt: false,
           model: 'anthropic/claude-4-sonnet-20250522',
           spawnerPrompt: 'Test',
           inputSchema: {},
@@ -289,6 +299,7 @@ describe('Agent Registry', () => {
           spawnableAgents: [],
           outputMode: 'last_message',
           includeMessageHistory: true,
+          inheritParentSystemPrompt: false,
           model: 'anthropic/claude-4-sonnet-20250522',
           spawnerPrompt: 'Test',
         },
@@ -327,6 +338,7 @@ describe('Agent Registry', () => {
           spawnableAgents: [],
           outputMode: 'last_message',
           includeMessageHistory: true,
+          inheritParentSystemPrompt: false,
           model: 'anthropic/claude-4-sonnet-20250522',
           spawnerPrompt: 'Local test',
           inputSchema: {},
@@ -356,6 +368,7 @@ describe('Agent Registry', () => {
           spawnableAgents: [],
           outputMode: 'last_message',
           includeMessageHistory: true,
+          inheritParentSystemPrompt: false,
           model: 'anthropic/claude-4-sonnet-20250522',
           spawnerPrompt: 'Cached test',
         },
@@ -479,6 +492,7 @@ describe('Agent Registry', () => {
           spawnableAgents: [],
           outputMode: 'last_message',
           includeMessageHistory: true,
+          inheritParentSystemPrompt: false,
           model: 'anthropic/claude-4-sonnet-20250522',
           spawnerPrompt: 'Cache test',
         },

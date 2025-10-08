@@ -4,6 +4,7 @@ import path from 'path'
 
 import { disableLiveUserInputCheck } from '@codebuff/backend/live-user-inputs'
 import { promptAiSdkStructured } from '@codebuff/backend/llm-apis/vercel-ai-sdk/ai-sdk'
+import { getErrorObject } from '@codebuff/common/util/error'
 import { withTimeout } from '@codebuff/common/util/promise'
 import { generateCompactId } from '@codebuff/common/util/string'
 import { cloneDeep } from 'lodash'
@@ -140,11 +141,11 @@ You must decide whether to:
   - In this case, just put an empty string for next_prompt
 
 If deciding to continue, include a clear, focused prompt for Codebuff in next_prompt. Note that Codebuff does not have access to the spec, so you must describe the changes you want Codebuff to make in a way that is clear and concise.
-Explain your reasoning in detail.`,
+Explain your reasoning in detail. Do not ask Codebuff to git commit changes.`,
             },
           ],
           schema: AgentDecisionSchema,
-          model: 'x-ai/grok-4-fast:free',
+          model: 'x-ai/grok-4-fast',
           clientSessionId,
           fingerprintId,
           userInputId: generateCompactId(),
@@ -232,7 +233,7 @@ Explain your reasoning in detail.`,
     const judgingResults = await judgeEvalRun(evalRun)
     console.log('Judging results:', judgingResults)
 
-    return {
+    const result = {
       ...evalRun,
       judging_results: judgingResults,
       computed_metrics: {
@@ -240,6 +241,18 @@ Explain your reasoning in detail.`,
         cost_usd: totalCostUsd,
       },
     }
+
+    if (process.env.NEXT_PUBLIC_CB_ENVIRONMENT === 'dev') {
+      const { eval_commit, gitDiff, ...rest } = result
+      const { fileStates, ...rest2 } = eval_commit
+
+      writeJsonToFile(
+        { ...rest, ...rest2 },
+        path.join(__dirname, `trace-${evalCommit.sha}.json`),
+      )
+    }
+
+    return result
   } catch (judgingError) {
     console.error('Error in judging:', judgingError)
     // Return without judging results if judging fails
@@ -247,7 +260,11 @@ Explain your reasoning in detail.`,
     return {
       ...evalRun,
       judging_results: {
-        analysis: 'Judging failed due to error',
+        analysis: `Judging failed due to error:\n${JSON.stringify(
+          judgingError instanceof Error
+            ? getErrorObject(judgingError)
+            : judgingError,
+        )}`,
         strengths: [],
         weaknesses: ['Judging process encountered an error'],
         metrics: {
@@ -264,18 +281,18 @@ Explain your reasoning in detail.`,
   }
 }
 
+function writeJsonToFile(json: any, path: string) {
+  fs.writeFileSync(path, JSON.stringify(json, null, 2))
+}
+
 function getCodebuffFileStates(
   evalCommitSha: string,
   projectPath: string,
 ): string {
-  // Stage all changes (including new files) before generating diff
-  execFileSync('git', ['add', '.'], {
-    cwd: projectPath,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  })
+  // Get all changes since the commit before the target commit
+  execFileSync('git', ['add', '.'], { cwd: projectPath, stdio: 'ignore' })
 
-  // Get diff of staged files to include new files
-  return execFileSync('git', ['diff', '--staged'], {
+  return execFileSync('git', ['diff', `${evalCommitSha}^`], {
     cwd: projectPath,
     stdio: ['ignore', 'pipe', 'pipe'],
   }).toString()

@@ -1,13 +1,11 @@
-import { google } from '@ai-sdk/google'
 import { openai } from '@ai-sdk/openai'
 import {
   finetunedVertexModels,
-  geminiModels,
   openaiModels,
 } from '@codebuff/common/old-constants'
 import { buildArray } from '@codebuff/common/util/array'
+import { getErrorObject } from '@codebuff/common/util/error'
 import { convertCbToModelMessages } from '@codebuff/common/util/messages'
-import { errorToObject } from '@codebuff/common/util/object'
 import { withTimeout } from '@codebuff/common/util/promise'
 import { StopSequenceHandler } from '@codebuff/common/util/stop-sequence'
 import { generateCompactId } from '@codebuff/common/util/string'
@@ -19,11 +17,7 @@ import { saveMessage } from '../message-cost-tracker'
 import { openRouterLanguageModel } from '../openrouter'
 import { vertexFinetuned } from './vertex-finetuned'
 
-import type {
-  GeminiModel,
-  Model,
-  OpenAIModel,
-} from '@codebuff/common/old-constants'
+import type { Model, OpenAIModel } from '@codebuff/common/old-constants'
 import type { Message } from '@codebuff/common/types/messages/codebuff-message'
 import type {
   OpenRouterProviderOptions,
@@ -51,9 +45,6 @@ const modelToAiSDKModel = (model: Model): LanguageModel => {
     )
   ) {
     return vertexFinetuned(model)
-  }
-  if (Object.values(geminiModels).includes(model as GeminiModel)) {
-    return google.languageModel(model)
   }
   if (model === openaiModels.o3pro || model === openaiModels.o3) {
     return openai.responses(model)
@@ -108,7 +99,6 @@ export const promptAiSdkStream = async function* (
   const response = streamText({
     ...options,
     model: aiSDKModel,
-    maxRetries: options.maxRetries,
     messages: convertCbToModelMessages(options),
   })
 
@@ -119,6 +109,7 @@ export const promptAiSdkStream = async function* (
     if (chunk.type !== 'text-delta') {
       const flushed = stopSequenceHandler.flush()
       if (flushed) {
+        content += flushed
         yield {
           type: 'text',
           text: flushed,
@@ -129,7 +120,7 @@ export const promptAiSdkStream = async function* (
       logger.error(
         {
           chunk: { ...chunk, error: undefined },
-          error: errorToObject(chunk.error),
+          error: getErrorObject(chunk.error),
           model: options.model,
         },
         'Error from AI SDK',
@@ -181,6 +172,7 @@ export const promptAiSdkStream = async function* (
 
       const stopSequenceResult = stopSequenceHandler.process(chunk.text)
       if (stopSequenceResult.text) {
+        content += stopSequenceResult.text
         yield {
           type: 'text',
           text: stopSequenceResult.text,
@@ -190,6 +182,7 @@ export const promptAiSdkStream = async function* (
   }
   const flushed = stopSequenceHandler.flush()
   if (flushed) {
+    content += flushed
     yield {
       type: 'text',
       text: flushed,
@@ -270,6 +263,7 @@ export const promptAiSdk = async function (
     agentId?: string
     onCostCalculated?: (credits: number) => Promise<void>
     includeCacheControl?: boolean
+    maxRetries?: number
   } & Omit<Parameters<typeof generateText>[0], 'model' | 'messages'>,
 ): Promise<string> {
   if (
@@ -344,6 +338,7 @@ export const promptAiSdkStructured = async function <T>(options: {
   agentId?: string
   onCostCalculated?: (credits: number) => Promise<void>
   includeCacheControl?: boolean
+  maxRetries?: number
 }): Promise<T> {
   if (
     !checkLiveUserInput(

@@ -11,7 +11,7 @@ import {
 import {
   finetunedVertexModelNames,
   finetunedVertexModels,
-  geminiModels,
+  models,
   TEST_USER_ID,
 } from '@codebuff/common/old-constants'
 import { generateCompactId } from '@codebuff/common/util/string'
@@ -35,7 +35,7 @@ const START_CURSOR = '2025-05-31T00:00:00.000Z' // User-provided start cursor or
 const GROUND_TRUTH_MODEL = 'claude-opus-4-20250514-with-full-file-context-new'
 
 const MODELS = [
-  geminiModels.gemini2flash,
+  models.openrouter_gemini2_5_flash,
   finetunedVertexModels.ft_filepicker_005,
   finetunedVertexModels.ft_filepicker_007,
   finetunedVertexModels.ft_filepicker_008,
@@ -45,7 +45,7 @@ const MODELS = [
 ] as const
 
 const modelDescriptions = {
-  [geminiModels.gemini2flash]:
+  [models.openrouter_gemini2_5_flash]:
     'gemini-2.0-flash-001: Base model, used to tune the finetuned models',
   [finetunedVertexModels.ft_filepicker_005]:
     'ft_filepicker_005: 74.6M tokens, 2 epochs, trained on Claude 3.5 Sonnet outputs',
@@ -94,7 +94,7 @@ async function runTraces() {
   const relabelMode = process.argv.includes('--relabel')
   const scoreMode = process.argv.includes('--score')
 
-  await setupBigQuery(DATASET)
+  await setupBigQuery({ dataset: DATASET, logger: console })
 
   if (relabelMode) {
     console.log('Running in relabel mode...')
@@ -169,7 +169,7 @@ async function relabelTraceForModel(
   const messages = payload.messages as Message[]
   const system = payload.system as System
 
-  let transformedMessages = messagesWithSystem(messages, system)
+  let transformedMessages = messagesWithSystem({ messages, system })
   if (modelToTest === finetunedVertexModels.ft_filepicker_010) {
     transformedMessages = transformedMessages
       .map((msg, i) => {
@@ -207,7 +207,7 @@ async function relabelTraceForModel(
     },
   }
 
-  await insertRelabel(newRelabel, dataset)
+  await insertRelabel({ relabel: newRelabel, dataset, logger: console })
 }
 
 // --- Scoring Mode Logic ---

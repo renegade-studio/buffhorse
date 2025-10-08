@@ -1,9 +1,9 @@
 import { trackEvent } from '@codebuff/common/analytics'
-import { DEFAULT_FREE_CREDITS_GRANT } from '@codebuff/common/old-constants'
 import { AnalyticsEvent } from '@codebuff/common/constants/analytics-events'
 import { GRANT_PRIORITIES } from '@codebuff/common/constants/grant-priorities'
 import db from '@codebuff/common/db'
 import * as schema from '@codebuff/common/db/schema'
+import { DEFAULT_FREE_CREDITS_GRANT } from '@codebuff/common/old-constants'
 import { getNextQuotaReset } from '@codebuff/common/util/dates'
 import { logger } from '@codebuff/common/util/logger'
 import { withRetry } from '@codebuff/common/util/promise'
@@ -205,12 +205,17 @@ export async function grantCreditOperation(
     }
   }
 
-  trackEvent(AnalyticsEvent.CREDIT_GRANT, userId, {
-    operationId,
-    type,
-    description,
-    amount,
-    expiresAt,
+  trackEvent({
+    event: AnalyticsEvent.CREDIT_GRANT,
+    userId,
+    properties: {
+      operationId,
+      type,
+      description,
+      amount,
+      expiresAt,
+    },
+    logger,
   })
 
   logger.info(
@@ -254,7 +259,12 @@ export async function processAndGrantCredit(
       },
     )
   } catch (error: any) {
-    await logSyncFailure(operationId, error.message, 'internal')
+    await logSyncFailure({
+      id: operationId,
+      errorMessage: error.message,
+      provider: 'internal',
+      logger,
+    })
     logger.error(
       { operationId, error },
       'processAndGrantCredit failed after retries, logged to sync_failure',

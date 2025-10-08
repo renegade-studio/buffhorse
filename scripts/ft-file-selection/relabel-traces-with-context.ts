@@ -19,7 +19,7 @@ const PAGE_SIZE = 30
 const START_CURSOR = '2025-05-27T00:00:00.000Z' // only helpful if you quit midway thru
 
 async function runTraces() {
-  await setupBigQuery(DATASET)
+  await setupBigQuery({ dataset: DATASET, logger: console })
   try {
     console.log(
       `\nProcessing traces for model ${MODEL_TO_TEST} with full file context...`,
@@ -90,12 +90,12 @@ async function runTraces() {
             console.log(`Processing trace ${trace.id}`)
 
             try {
-              await relabelWithClaudeWithFullFileContext(
+              await relabelWithClaudeWithFullFileContext({
                 trace,
                 fileBlobs,
-                MODEL_TO_TEST,
-                DATASET,
-              )
+                model: MODEL_TO_TEST,
+                dataset: DATASET,
+              })
               console.log(`Successfully stored relabel for trace ${trace.id}`)
             } catch (error) {
               console.error(`Error processing trace ${trace.id}:`, error)

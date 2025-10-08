@@ -13,9 +13,6 @@ export const API_KEY_ENV_VAR = 'CODEBUFF_API_KEY'
 export const INVALID_AUTH_TOKEN_MESSAGE =
   'Invalid auth token. You may have been logged out from the web portal. Please log in again.'
 
-// Enable async agents to run tool calls even when main user input is cancelled
-export const ASYNC_AGENTS_ENABLED = true
-
 // Allowed model prefixes for validation
 export const ALLOWED_MODEL_PREFIXES = [
   'anthropic',
@@ -185,15 +182,8 @@ export const openaiModels = {
 } as const
 export type OpenAIModel = (typeof openaiModels)[keyof typeof openaiModels]
 
-export const geminiModels = {
-  gemini2_5_flash: 'gemini-2.5-flash-preview-05-20',
-  gemini2_5_flash_thinking: 'gemini-2.5-flash-preview-05-20:thinking',
-  gemini2flash: 'gemini-2.0-flash-001',
-  gemini2_5_pro_preview: 'gemini-2.5-pro-preview-06-05',
-} as const
-export type GeminiModel = (typeof geminiModels)[keyof typeof geminiModels]
-
 export const openrouterModels = {
+  openrouter_claude_sonnet_4_5: 'anthropic/claude-sonnet-4.5',
   openrouter_claude_sonnet_4: 'anthropic/claude-4-sonnet-20250522',
   openrouter_claude_opus_4: 'anthropic/claude-opus-4.1',
   openrouter_claude_3_5_haiku: 'anthropic/claude-3.5-haiku-20241022',
@@ -249,7 +239,6 @@ export type FinetunedVertexModel =
 export const models = {
   // ...claudeModels,
   ...openaiModels,
-  ...geminiModels,
   ...deepseekModels,
   ...openrouterModels,
   ...finetunedVertexModels,
@@ -259,6 +248,7 @@ export const shortModelNames = {
   'gemini-2.5-pro': models.openrouter_gemini2_5_pro_preview,
   'flash-2.5': models.openrouter_gemini2_5_flash,
   'opus-4': models.openrouter_claude_opus_4,
+  'sonnet-4.5': models.openrouter_claude_sonnet_4_5,
   'sonnet-4': models.openrouter_claude_sonnet_4,
   'sonnet-3.7': models.openrouter_claude_sonnet_4,
   'sonnet-3.6': models.openrouter_claude_3_5_sonnet,
@@ -271,12 +261,6 @@ export const shortModelNames = {
 }
 
 export const providerModelNames = {
-  ...Object.fromEntries(
-    Object.entries(geminiModels).map(([name, model]) => [
-      model,
-      'gemini' as const,
-    ]),
-  ),
   // ...Object.fromEntries(
   //   Object.entries(openrouterModels).map(([name, model]) => [
   //     model,
@@ -312,6 +296,12 @@ const nonCacheableModels = [
   models.openrouter_grok_4,
 ] satisfies string[] as string[]
 export function supportsCacheControl(model: Model): boolean {
+  if (model.startsWith('openai/')) {
+    return true
+  }
+  if (model.startsWith('anthropic/')) {
+    return true
+  }
   if (!isExplicitlyDefinedModel(model)) {
     // Default to no cache control for unknown models
     return false
@@ -347,9 +337,7 @@ export const providerDomains = {
 export function getLogoForModel(modelName: string): string | undefined {
   let domain: string | undefined
 
-  if (Object.values(geminiModels).includes(modelName as GeminiModel))
-    domain = providerDomains.google
-  else if (Object.values(openaiModels).includes(modelName as OpenAIModel))
+  if (Object.values(openaiModels).includes(modelName as OpenAIModel))
     domain = providerDomains.openai
   else if (Object.values(deepseekModels).includes(modelName as DeepseekModel))
     domain = providerDomains.deepseek

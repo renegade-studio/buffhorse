@@ -2,16 +2,11 @@ import * as bigquery from '@codebuff/bigquery'
 import * as analytics from '@codebuff/common/analytics'
 import db from '@codebuff/common/db'
 import { TEST_USER_ID } from '@codebuff/common/old-constants'
-import {
-  clearMockedModules,
-  mockModule,
-} from '@codebuff/common/testing/mock-modules'
 import { getToolCallString } from '@codebuff/common/tools/utils'
 import { getInitialSessionState } from '@codebuff/common/types/session-state'
 import {
   afterAll,
   afterEach,
-  beforeAll,
   beforeEach,
   describe,
   expect,
@@ -30,23 +25,17 @@ import * as websocketAction from '../websockets/websocket-action'
 
 import type { AgentTemplate } from '../templates/types'
 import type { ProjectFileContext } from '@codebuff/common/util/file'
+import type { Logger } from '@codebuff/types/logger'
 import type { WebSocket } from 'ws'
 
 describe('runAgentStep - set_output tool', () => {
   let testAgent: AgentTemplate
-
-  beforeAll(() => {
-    // Mock logger
-    mockModule('@codebuff/backend/util/logger', () => ({
-      logger: {
-        debug: () => {},
-        error: () => {},
-        info: () => {},
-        warn: () => {},
-      },
-      withLoggerContext: async (context: any, fn: () => Promise<any>) => fn(),
-    }))
-  })
+  const logger: Logger = {
+    debug: () => {},
+    error: () => {},
+    info: () => {},
+    warn: () => {},
+  }
 
   beforeEach(async () => {
     // Create a test agent that supports set_output
@@ -58,6 +47,7 @@ describe('runAgentStep - set_output tool', () => {
       inputSchema: {},
       outputMode: 'structured_output' as const,
       includeMessageHistory: true,
+      inheritParentSystemPrompt: false,
       mcpServers: {},
       toolNames: ['set_output', 'end_turn'],
       spawnableAgents: [],
@@ -79,7 +69,7 @@ describe('runAgentStep - set_output tool', () => {
 
     // Mock analytics and tracing
     spyOn(analytics, 'initAnalytics').mockImplementation(() => {})
-    analytics.initAnalytics()
+    analytics.initAnalytics({ logger })
     spyOn(analytics, 'trackEvent').mockImplementation(() => {})
     spyOn(bigquery, 'insertTrace').mockImplementation(() =>
       Promise.resolve(true),
@@ -88,13 +78,12 @@ describe('runAgentStep - set_output tool', () => {
     // Mock live user inputs to always return true (simulating active session)
     spyOn(liveUserInputs, 'checkLiveUserInput').mockImplementation(() => true)
     spyOn(liveUserInputs, 'startUserInput').mockImplementation(() => {})
-    spyOn(liveUserInputs, 'endUserInput').mockImplementation(() => {})
     spyOn(liveUserInputs, 'setSessionConnected').mockImplementation(() => {})
 
     spyOn(websocketAction, 'requestFiles').mockImplementation(
-      async (ws: any, paths: string[]) => {
+      async (params: { ws: any; filePaths: string[] }) => {
         const results: Record<string, string | null> = {}
-        paths.forEach((p) => {
+        params.filePaths.forEach((p) => {
           if (p === 'src/auth.ts') {
             results[p] = 'export function authenticate() { return true; }'
           } else if (p === 'src/user.ts') {
@@ -108,10 +97,10 @@ describe('runAgentStep - set_output tool', () => {
     )
 
     spyOn(websocketAction, 'requestFile').mockImplementation(
-      async (ws: any, path: string) => {
-        if (path === 'src/auth.ts') {
+      async (params: { ws: any; filePath: string }) => {
+        if (params.filePath === 'src/auth.ts') {
           return 'export function authenticate() { return true; }'
-        } else if (path === 'src/user.ts') {
+        } else if (params.filePath === 'src/user.ts') {
           return 'export interface User { id: string; name: string; }'
         }
         return null
@@ -132,7 +121,6 @@ describe('runAgentStep - set_output tool', () => {
   })
 
   afterAll(() => {
-    clearMockedModules()
     clearAgentGeneratorCache()
   })
 
@@ -202,6 +190,7 @@ describe('runAgentStep - set_output tool', () => {
         agentState,
         prompt: 'Analyze the codebase',
         params: undefined,
+        system: 'Test system prompt',
       },
     )
 
@@ -244,6 +233,7 @@ describe('runAgentStep - set_output tool', () => {
         agentState,
         prompt: 'Analyze the codebase',
         params: undefined,
+        system: 'Test system prompt',
       },
     )
 
@@ -292,6 +282,7 @@ describe('runAgentStep - set_output tool', () => {
         agentState,
         prompt: 'Update the output',
         params: undefined,
+        system: 'Test system prompt',
       },
     )
 
@@ -331,6 +322,7 @@ describe('runAgentStep - set_output tool', () => {
         agentState,
         prompt: 'Update with empty object',
         params: undefined,
+        system: 'Test system prompt',
       },
     )
 
@@ -348,6 +340,7 @@ describe('runAgentStep - set_output tool', () => {
       inputSchema: {},
       outputMode: 'structured_output' as const,
       includeMessageHistory: true,
+      inheritParentSystemPrompt: false,
       mcpServers: {},
       toolNames: ['read_files', 'end_turn'],
       spawnableAgents: [],
@@ -372,9 +365,9 @@ describe('runAgentStep - set_output tool', () => {
 
     // Mock requestFiles to return test file content
     spyOn(websocketAction, 'requestFiles').mockImplementation(
-      async (ws: any, paths: string[]) => {
+      async (params: { ws: any; filePaths: string[] }) => {
         const results: Record<string, string | null> = {}
-        paths.forEach((p) => {
+        params.filePaths.forEach((p) => {
           if (p === 'src/test.ts') {
             results[p] = 'export function testFunction() { return "test"; }'
           } else {
@@ -426,6 +419,7 @@ describe('runAgentStep - set_output tool', () => {
         agentState,
         prompt: 'Test the handleSteps functionality',
         params: undefined,
+        system: 'Test system prompt',
       },
     )
 
@@ -468,6 +462,7 @@ describe('runAgentStep - set_output tool', () => {
       inputSchema: {},
       outputMode: 'structured_output' as const,
       includeMessageHistory: true,
+      inheritParentSystemPrompt: false,
       mcpServers: {},
       toolNames: ['set_messages', 'end_turn'],
       spawnableAgents: [],
@@ -519,6 +514,7 @@ describe('runAgentStep - set_output tool', () => {
       inputSchema: {},
       outputMode: 'structured_output' as const,
       includeMessageHistory: true,
+      inheritParentSystemPrompt: false,
       mcpServers: {},
       toolNames: ['spawn_agent_inline', 'end_turn'],
       spawnableAgents: ['message-deleter-agent'],
@@ -584,6 +580,7 @@ describe('runAgentStep - set_output tool', () => {
         agentState,
         prompt: 'Spawn an inline agent to clean up messages',
         params: undefined,
+        system: 'Parent system prompt',
       },
     )
 

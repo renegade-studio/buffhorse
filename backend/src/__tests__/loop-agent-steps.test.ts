@@ -19,6 +19,7 @@ import {
   spyOn,
 } from 'bun:test'
 
+import { withAppContext } from '../context/app-context'
 import { loopAgentSteps } from '../run-agent-step'
 import { clearAgentGeneratorCache } from '../run-programmatic-step'
 import { mockFileContext, MockWebSocket } from './test-utils'
@@ -28,11 +29,29 @@ import type { AgentTemplate } from '../templates/types'
 import type { StepGenerator } from '@codebuff/common/types/agent-template'
 import type { AgentState } from '@codebuff/common/types/session-state'
 import type { WebSocket } from 'ws'
+import { z } from 'zod/v4'
 
 describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => {
   let mockTemplate: AgentTemplate
   let mockAgentState: AgentState
   let llmCallCount: number
+
+  const runLoopAgentStepsWithContext = async (
+    ws: WebSocket,
+    options: Parameters<typeof loopAgentSteps>[1],
+  ) => {
+    return await withAppContext(
+      {
+        userId: options.userId,
+        clientSessionId: options.clientSessionId,
+      },
+      {
+        currentUserId: options.userId,
+        processedRepoId: 'test-repo',
+      },
+      async () => loopAgentSteps(ws, options),
+    )
+  }
 
   beforeAll(() => {
     // Mock logger
@@ -63,29 +82,26 @@ describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => 
       getAgentPrompt: async () => 'Mock prompt',
     }))
 
-    // Mock live user inputs - will be overridden in individual tests
+    // Mock live user inputs - default to true to allow tests to run
     mockModule('@codebuff/backend/live-user-inputs', () => ({
-      checkLiveUserInput: () => false, // Default to false, override in tests
+      checkLiveUserInput: () => true,
+      resetLiveUserInputsState: () => {},
+      startUserInput: () => {},
+      endUserInput: () => {},
+      cancelUserInput: () => {},
+      setSessionConnected: () => {},
+      getLiveUserInputIds: () => undefined,
     }))
 
     // Mock file reading updates
     mockModule('@codebuff/backend/get-file-reading-updates', () => ({
       getFileReadingUpdates: async () => [],
     }))
-
-    // Mock async agent manager
-    mockModule('@codebuff/backend/async-agent-manager', () => ({
-      asyncAgentManager: {
-        getAgent: () => null,
-        registerAgent: () => {},
-        updateAgentState: () => {},
-        getAndClearMessages: () => [],
-        getMessages: () => [],
-      },
-    }))
   })
 
   beforeEach(() => {
+    clearAgentGeneratorCache()
+
     llmCallCount = 0
 
     // Setup spies for database operations
@@ -130,6 +146,7 @@ describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => 
       inputSchema: {},
       outputMode: 'structured_output',
       includeMessageHistory: true,
+      inheritParentSystemPrompt: false,
       mcpServers: {},
       toolNames: ['read_files', 'write_file', 'end_turn'],
       spawnableAgents: [],
@@ -154,8 +171,9 @@ describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => 
   })
 
   afterEach(() => {
-    mock.restore()
     clearAgentGeneratorCache()
+
+    mock.restore()
   })
 
   afterAll(() => {
@@ -186,13 +204,7 @@ describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => 
       'test-agent': mockTemplate,
     }
 
-    // Mock checkLiveUserInput to allow the loop to continue
-    const mockCheckLiveUserInput = require('@codebuff/backend/live-user-inputs')
-    spyOn(mockCheckLiveUserInput, 'checkLiveUserInput').mockImplementation(
-      () => true, // Always return true to allow loop to continue
-    )
-
-    const result = await loopAgentSteps(
+    const result = await runLoopAgentStepsWithContext(
       new MockWebSocket() as unknown as WebSocket,
       {
         userInputId: 'test-user-input',
@@ -239,7 +251,7 @@ describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => 
       'test-agent': mockTemplate,
     }
 
-    const result = await loopAgentSteps(
+    const result = await runLoopAgentStepsWithContext(
       new MockWebSocket() as unknown as WebSocket,
       {
         userInputId: 'test-user-input',
@@ -288,13 +300,7 @@ describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => 
       'test-agent': mockTemplate,
     }
 
-    // Mock checkLiveUserInput to allow multiple iterations
-    const mockCheckLiveUserInput = require('@codebuff/backend/live-user-inputs')
-    spyOn(mockCheckLiveUserInput, 'checkLiveUserInput').mockImplementation(
-      () => true, // Always return true to allow loop to continue
-    )
-
-    const result = await loopAgentSteps(
+    const result = await runLoopAgentStepsWithContext(
       new MockWebSocket() as unknown as WebSocket,
       {
         userInputId: 'test-user-input',
@@ -342,16 +348,7 @@ describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => 
       'test-agent': mockTemplate,
     }
 
-    let checkCallCount = 0
-    const mockCheckLiveUserInput = require('@codebuff/backend/live-user-inputs')
-    spyOn(mockCheckLiveUserInput, 'checkLiveUserInput').mockImplementation(
-      () => {
-        checkCallCount++
-        return checkCallCount <= 5
-      },
-    )
-
-    const result = await loopAgentSteps(
+    const result = await runLoopAgentStepsWithContext(
       new MockWebSocket() as unknown as WebSocket,
       {
         userInputId: 'test-user-input',
@@ -392,7 +389,7 @@ describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => 
       'test-agent': mockTemplate,
     }
 
-    const result = await loopAgentSteps(
+    const result = await runLoopAgentStepsWithContext(
       new MockWebSocket() as unknown as WebSocket,
       {
         userInputId: 'test-user-input',
@@ -425,16 +422,7 @@ describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => 
       'test-agent': llmOnlyTemplate,
     }
 
-    let checkCallCount = 0
-    const mockCheckLiveUserInput = require('@codebuff/backend/live-user-inputs')
-    spyOn(mockCheckLiveUserInput, 'checkLiveUserInput').mockImplementation(
-      () => {
-        checkCallCount++
-        return checkCallCount <= 2 // Allow 2 iterations
-      },
-    )
-
-    const result = await loopAgentSteps(
+    const result = await runLoopAgentStepsWithContext(
       new MockWebSocket() as unknown as WebSocket,
       {
         userInputId: 'test-user-input',
@@ -469,16 +457,7 @@ describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => 
       'test-agent': mockTemplate,
     }
 
-    let checkCallCount = 0
-    const mockCheckLiveUserInput = require('@codebuff/backend/live-user-inputs')
-    spyOn(mockCheckLiveUserInput, 'checkLiveUserInput').mockImplementation(
-      () => {
-        checkCallCount++
-        return checkCallCount <= 2
-      },
-    )
-
-    const result = await loopAgentSteps(
+    const result = await runLoopAgentStepsWithContext(
       new MockWebSocket() as unknown as WebSocket,
       {
         userInputId: 'test-user-input',
@@ -530,16 +509,7 @@ describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => 
       'test-agent': mockTemplate,
     }
 
-    let checkCallCount = 0
-    const mockCheckLiveUserInput = require('@codebuff/backend/live-user-inputs')
-    spyOn(mockCheckLiveUserInput, 'checkLiveUserInput').mockImplementation(
-      () => {
-        checkCallCount++
-        return checkCallCount <= 10 // Allow many iterations
-      },
-    )
-
-    const result = await loopAgentSteps(
+    const result = await runLoopAgentStepsWithContext(
       new MockWebSocket() as unknown as WebSocket,
       {
         userInputId: 'test-user-input',
@@ -560,64 +530,6 @@ describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => 
     expect(llmCallCount).toBe(1) // LLM called once after STEP
     expect(result.agentState).toBeDefined()
   })
-
-  it('should respect async agent messages and continue appropriately', async () => {
-    // Test async agent message handling during loopAgentSteps
-
-    const mockGeneratorFunction = function* () {
-      yield { toolName: 'read_files', input: { paths: ['async-test.txt'] } }
-      yield 'STEP'
-    } as () => StepGenerator
-
-    mockTemplate.handleSteps = mockGeneratorFunction
-
-    const localAgentTemplates = {
-      'test-agent': mockTemplate,
-    }
-
-    // Mock async agent manager to simulate pending messages
-    const mockAsyncAgentManager = require('@codebuff/backend/async-agent-manager')
-    let getMessagesCallCount = 0
-    spyOn(
-      mockAsyncAgentManager.asyncAgentManager,
-      'getMessages',
-    ).mockImplementation(() => {
-      getMessagesCallCount++
-      // Return messages on second call to simulate async agent activity
-      return getMessagesCallCount === 2 ? ['async message'] : []
-    })
-
-    let checkCallCount = 0
-    const mockCheckLiveUserInput = require('@codebuff/backend/live-user-inputs')
-    spyOn(mockCheckLiveUserInput, 'checkLiveUserInput').mockImplementation(
-      () => {
-        checkCallCount++
-        return checkCallCount <= 5
-      },
-    )
-
-    const result = await loopAgentSteps(
-      new MockWebSocket() as unknown as WebSocket,
-      {
-        userInputId: 'test-user-input',
-        agentType: 'test-agent',
-        agentState: mockAgentState,
-        prompt: 'Test async agent messages',
-        params: undefined,
-        fingerprintId: 'test-fingerprint',
-        fileContext: mockFileContext,
-        localAgentTemplates,
-        userId: TEST_USER_ID,
-        clientSessionId: 'test-session',
-        onResponseChunk: () => {},
-      },
-    )
-
-    // Should continue when async messages are present
-    expect(result.agentState).toBeDefined()
-    expect(getMessagesCallCount).toBeGreaterThan(0)
-  })
-
   it('should pass shouldEndTurn: true as stepsComplete when end_turn tool is called', async () => {
     // Test that when LLM calls end_turn, shouldEndTurn is correctly passed to runProgrammaticStep
 
@@ -647,25 +559,22 @@ describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => 
       'test-agent': mockTemplate,
     }
 
-    // Mock checkLiveUserInput to allow the loop to run
-    const mockCheckLiveUserInput = require('@codebuff/backend/live-user-inputs')
-    spyOn(mockCheckLiveUserInput, 'checkLiveUserInput').mockImplementation(
-      () => true,
+    await runLoopAgentStepsWithContext(
+      new MockWebSocket() as unknown as WebSocket,
+      {
+        userInputId: 'test-user-input',
+        agentType: 'test-agent',
+        agentState: mockAgentState,
+        prompt: 'Test shouldEndTurn to stepsComplete flow',
+        params: undefined,
+        fingerprintId: 'test-fingerprint',
+        fileContext: mockFileContext,
+        localAgentTemplates,
+        userId: TEST_USER_ID,
+        clientSessionId: 'test-session',
+        onResponseChunk: () => {},
+      },
     )
-
-    await loopAgentSteps(new MockWebSocket() as unknown as WebSocket, {
-      userInputId: 'test-user-input',
-      agentType: 'test-agent',
-      agentState: mockAgentState,
-      prompt: 'Test shouldEndTurn to stepsComplete flow',
-      params: undefined,
-      fingerprintId: 'test-fingerprint',
-      fileContext: mockFileContext,
-      localAgentTemplates,
-      userId: TEST_USER_ID,
-      clientSessionId: 'test-session',
-      onResponseChunk: () => {},
-    })
 
     mockedRunProgrammaticStep.clear()
 
@@ -679,5 +588,276 @@ describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => 
 
     // Second call should have stepsComplete: true (after end_turn tool was called)
     expect(runProgrammaticStepCalls[1].options.stepsComplete).toBe(true)
+  })
+
+  it('should restart loop when agent finishes without setting required output', async () => {
+    // Test that when an agent has outputSchema but finishes without calling set_output,
+    // the loop restarts with a system message
+
+    const outputSchema = z.object({
+      result: z.string(),
+      status: z.string(),
+    })
+
+    const templateWithOutputSchema = {
+      ...mockTemplate,
+      outputSchema,
+      toolNames: ['set_output', 'end_turn'], // Add set_output to available tools
+      handleSteps: undefined, // LLM-only agent
+    }
+
+    const localAgentTemplates = {
+      'test-agent': templateWithOutputSchema,
+    }
+
+    let llmCallNumber = 0
+    let capturedAgentState: AgentState | null = null
+
+    spyOn(aisdk, 'promptAiSdkStream').mockImplementation(async function* ({}) {
+      llmCallNumber++
+      if (llmCallNumber === 1) {
+        // First call: agent tries to end turn without setting output
+        yield {
+          type: 'text' as const,
+          text: `First response without output\n\n${getToolCallString('end_turn', {})}`,
+        }
+      } else if (llmCallNumber === 2) {
+        // Second call: agent sets output after being reminded
+        // Manually set the output to simulate the set_output tool execution
+        if (capturedAgentState) {
+          capturedAgentState.output = {
+            result: 'test result',
+            status: 'success',
+          }
+        }
+        yield {
+          type: 'text' as const,
+          text: `Setting output now\n\n${getToolCallString('set_output', { result: 'test result', status: 'success' })}\n\n${getToolCallString('end_turn', {})}`,
+        }
+      } else {
+        // Safety: if called more than twice, just end
+        yield {
+          type: 'text' as const,
+          text: `Ending\n\n${getToolCallString('end_turn', {})}`,
+        }
+      }
+      return 'mock-message-id'
+    })
+
+    mockAgentState.output = undefined
+    capturedAgentState = mockAgentState
+
+    const result = await runLoopAgentStepsWithContext(
+      new MockWebSocket() as unknown as WebSocket,
+      {
+        userInputId: 'test-user-input',
+        agentType: 'test-agent',
+        agentState: mockAgentState,
+        prompt: 'Test output schema validation',
+        params: undefined,
+        fingerprintId: 'test-fingerprint',
+        fileContext: mockFileContext,
+        localAgentTemplates,
+        userId: TEST_USER_ID,
+        clientSessionId: 'test-session',
+        onResponseChunk: () => {},
+      },
+    )
+
+    // Should call LLM twice: once to try ending without output, once after reminder
+    expect(llmCallNumber).toBe(2)
+
+    // Should have output set after the second attempt
+    expect(result.agentState.output).toEqual({
+      result: 'test result',
+      status: 'success',
+    })
+
+    // Check that a system message was added to message history
+    const systemMessages = result.agentState.messageHistory.filter(
+      (msg) =>
+        msg.role === 'user' &&
+        typeof msg.content === 'string' &&
+        msg.content.includes('set_output'),
+    )
+    expect(systemMessages.length).toBeGreaterThan(0)
+  })
+
+  it('should not restart loop if output is set correctly', async () => {
+    // Test that when an agent has outputSchema and sets output correctly,
+    // the loop ends normally without restarting
+
+    const outputSchema = z.object({
+      result: z.string(),
+    })
+
+    const templateWithOutputSchema = {
+      ...mockTemplate,
+      outputSchema,
+      toolNames: ['set_output', 'end_turn'],
+      handleSteps: undefined,
+    }
+
+    const localAgentTemplates = {
+      'test-agent': templateWithOutputSchema,
+    }
+
+    let llmCallNumber = 0
+    let capturedAgentState: AgentState | null = null
+
+    spyOn(aisdk, 'promptAiSdkStream').mockImplementation(async function* ({}) {
+      llmCallNumber++
+      // Agent sets output correctly on first call
+      if (capturedAgentState) {
+        capturedAgentState.output = { result: 'success' }
+      }
+      yield {
+        type: 'text' as const,
+        text: `Setting output\n\n${getToolCallString('set_output', { result: 'success' })}\n\n${getToolCallString('end_turn', {})}`,
+      }
+      return 'mock-message-id'
+    })
+
+    mockAgentState.output = undefined
+    capturedAgentState = mockAgentState
+
+    const result = await runLoopAgentStepsWithContext(
+      new MockWebSocket() as unknown as WebSocket,
+      {
+        userInputId: 'test-user-input',
+        agentType: 'test-agent',
+        agentState: mockAgentState,
+        prompt: 'Test with correct output',
+        params: undefined,
+        fingerprintId: 'test-fingerprint',
+        fileContext: mockFileContext,
+        localAgentTemplates,
+        userId: TEST_USER_ID,
+        clientSessionId: 'test-session',
+        onResponseChunk: () => {},
+      },
+    )
+
+    // Should only call LLM once since output was set correctly
+    expect(llmCallNumber).toBe(1)
+
+    // Should have output set
+    expect(result.agentState.output).toEqual({ result: 'success' })
+  })
+
+  it('should allow agents without outputSchema to end normally', async () => {
+    // Test that agents without outputSchema can end without setting output
+
+    const templateWithoutOutputSchema = {
+      ...mockTemplate,
+      outputSchema: undefined,
+      handleSteps: undefined,
+    }
+
+    const localAgentTemplates = {
+      'test-agent': templateWithoutOutputSchema,
+    }
+
+    let llmCallNumber = 0
+    spyOn(aisdk, 'promptAiSdkStream').mockImplementation(async function* ({}) {
+      llmCallNumber++
+      yield {
+        type: 'text' as const,
+        text: `Response without output\n\n${getToolCallString('end_turn', {})}`,
+      }
+      return 'mock-message-id'
+    })
+
+    const result = await runLoopAgentStepsWithContext(
+      new MockWebSocket() as unknown as WebSocket,
+      {
+        userInputId: 'test-user-input',
+        agentType: 'test-agent',
+        agentState: mockAgentState,
+        prompt: 'Test without output schema',
+        params: undefined,
+        fingerprintId: 'test-fingerprint',
+        fileContext: mockFileContext,
+        localAgentTemplates,
+        userId: TEST_USER_ID,
+        clientSessionId: 'test-session',
+        onResponseChunk: () => {},
+      },
+    )
+
+    // Should only call LLM once and end normally
+    expect(llmCallNumber).toBe(1)
+
+    // Output should be undefined since no outputSchema required
+    expect(result.agentState.output).toBeUndefined()
+  })
+
+  it('should continue loop if agent does not end turn (has more work)', async () => {
+    // Test that validation only triggers when shouldEndTurn is true
+
+    const outputSchema = z.object({
+      result: z.string(),
+    })
+
+    const templateWithOutputSchema = {
+      ...mockTemplate,
+      outputSchema,
+      toolNames: ['read_files', 'set_output', 'end_turn'],
+      handleSteps: undefined,
+    }
+
+    const localAgentTemplates = {
+      'test-agent': templateWithOutputSchema,
+    }
+
+    let llmCallNumber = 0
+    let capturedAgentState: AgentState | null = null
+
+    spyOn(aisdk, 'promptAiSdkStream').mockImplementation(async function* ({}) {
+      llmCallNumber++
+      if (llmCallNumber === 1) {
+        // First call: agent does some work but doesn't end turn
+        yield {
+          type: 'text' as const,
+          text: `Doing work\n\n${getToolCallString('read_files', { paths: ['test.txt'] })}`,
+        }
+      } else {
+        // Second call: agent sets output and ends
+        if (capturedAgentState) {
+          capturedAgentState.output = { result: 'done' }
+        }
+        yield {
+          type: 'text' as const,
+          text: `Finishing\n\n${getToolCallString('set_output', { result: 'done' })}\n\n${getToolCallString('end_turn', {})}`,
+        }
+      }
+      return 'mock-message-id'
+    })
+
+    mockAgentState.output = undefined
+    capturedAgentState = mockAgentState
+
+    const result = await runLoopAgentStepsWithContext(
+      new MockWebSocket() as unknown as WebSocket,
+      {
+        userInputId: 'test-user-input',
+        agentType: 'test-agent',
+        agentState: mockAgentState,
+        prompt: 'Test loop continues',
+        params: undefined,
+        fingerprintId: 'test-fingerprint',
+        fileContext: mockFileContext,
+        localAgentTemplates,
+        userId: TEST_USER_ID,
+        clientSessionId: 'test-session',
+        onResponseChunk: () => {},
+      },
+    )
+
+    // Should call LLM twice: once for work, once to set output and end
+    expect(llmCallNumber).toBe(2)
+
+    // Should have output set
+    expect(result.agentState.output).toEqual({ result: 'done' })
   })
 })

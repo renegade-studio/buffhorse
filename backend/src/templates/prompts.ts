@@ -43,6 +43,8 @@ params: None`
         `- ${agentType}: ${agentTemplate.spawnerPrompt}`,
         agentTemplate.includeMessageHistory &&
           'This agent can see the current message history.',
+        agentTemplate.inheritParentSystemPrompt &&
+          "This agent inherits the parent's system prompt for prompt caching.",
         inputSchemaStr,
       ).join('\n')
     })
@@ -51,7 +53,7 @@ params: None`
 
   return `\n\n## Spawnable Agents
 
-Use the spawn_agents tool to spawn agents to help you complete the user request. Here are the available agents by their agent_type:
+Use the spawn_agents tool to spawn agents to help you complete the user request. Below are the *only* available agents by their agent_type. Other agents may be referenced earlier in the conversation, but they are not available to you. Spawn only the below agents:
 
 ${agentsDescription}`
 }

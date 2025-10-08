@@ -1,19 +1,13 @@
 import * as bigquery from '@codebuff/bigquery'
 import * as analytics from '@codebuff/common/analytics'
 import { TEST_USER_ID } from '@codebuff/common/old-constants'
-import {
-  clearMockedModules,
-  mockModule,
-} from '@codebuff/common/testing/mock-modules'
 import { getToolCallString } from '@codebuff/common/tools/utils'
 import {
   AgentTemplateTypes,
   getInitialSessionState,
 } from '@codebuff/common/types/session-state'
 import {
-  afterAll,
   afterEach,
-  beforeAll,
   beforeEach,
   describe,
   expect,
@@ -34,6 +28,7 @@ import * as websocketAction from '../websockets/websocket-action'
 
 import type { AgentTemplate } from '@codebuff/common/types/agent-template'
 import type { ProjectFileContext } from '@codebuff/common/util/file'
+import type { Logger } from '@codebuff/types/logger'
 import type { WebSocket } from 'ws'
 
 const mockAgentStream = (streamOutput: string) => {
@@ -45,6 +40,12 @@ const mockAgentStream = (streamOutput: string) => {
 
 describe('mainPrompt', () => {
   let mockLocalAgentTemplates: Record<string, any>
+  const logger: Logger = {
+    debug: () => {},
+    error: () => {},
+    info: () => {},
+    warn: () => {},
+  }
 
   beforeEach(() => {
     // Setup common mock agent templates
@@ -57,6 +58,7 @@ describe('mainPrompt', () => {
         spawnerPrompt: '',
         model: 'gpt-4o-mini',
         includeMessageHistory: true,
+        inheritParentSystemPrompt: false,
         mcpServers: {},
         toolNames: ['write_file', 'run_terminal_command'],
         spawnableAgents: [],
@@ -72,6 +74,7 @@ describe('mainPrompt', () => {
         spawnerPrompt: '',
         model: 'gpt-4o',
         includeMessageHistory: true,
+        inheritParentSystemPrompt: false,
         mcpServers: {},
         toolNames: ['write_file', 'run_terminal_command'],
         spawnableAgents: [],
@@ -82,23 +85,10 @@ describe('mainPrompt', () => {
     }
   })
 
-  beforeAll(() => {
-    // Mock logger
-    mockModule('@codebuff/backend/util/logger', () => ({
-      logger: {
-        debug: () => {},
-        error: () => {},
-        info: () => {},
-        warn: () => {},
-      },
-      withLoggerContext: async (context: any, fn: () => Promise<any>) => fn(),
-    }))
-  })
-
   beforeEach(() => {
     // Mock analytics and tracing
     spyOn(analytics, 'initAnalytics').mockImplementation(() => {})
-    analytics.initAnalytics() // Initialize the mock
+    analytics.initAnalytics({ logger }) // Initialize the mock
     spyOn(analytics, 'trackEvent').mockImplementation(() => {})
     spyOn(bigquery, 'insertTrace').mockImplementation(() =>
       Promise.resolve(true),
@@ -106,12 +96,11 @@ describe('mainPrompt', () => {
 
     // Mock processFileBlock
     spyOn(processFileBlockModule, 'processFileBlock').mockImplementation(
-      async (path, instructions, contentPromise, newContent) => {
+      async (params) => {
         return {
           tool: 'write_file' as const,
-          path,
-          instructions,
-          content: newContent,
+          path: params.path,
+          content: params.newContent,
           patch: undefined,
           messages: [],
         }
@@ -126,9 +115,9 @@ describe('mainPrompt', () => {
 
     // Mock websocket actions
     spyOn(websocketAction, 'requestFiles').mockImplementation(
-      async (ws: any, paths: string[]) => {
+      async (params: { ws: any; filePaths: string[] }) => {
         const results: Record<string, string | null> = {}
-        paths.forEach((p) => {
+        params.filePaths.forEach((p) => {
           if (p === 'test.txt') {
             results[p] = 'mock content for test.txt'
           } else {
@@ -140,8 +129,8 @@ describe('mainPrompt', () => {
     )
 
     spyOn(websocketAction, 'requestFile').mockImplementation(
-      async (ws: any, path: string) => {
-        if (path === 'test.txt') {
+      async (params: { ws: any; filePath: string }) => {
+        if (params.filePath === 'test.txt') {
           return 'mock content for test.txt'
         }
         return null
@@ -187,10 +176,6 @@ describe('mainPrompt', () => {
   afterEach(() => {
     // Clear all mocks after each test
     mock.restore()
-  })
-
-  afterAll(() => {
-    clearMockedModules()
   })
 
   class MockWebSocket {
@@ -319,6 +304,7 @@ describe('mainPrompt', () => {
           spawnerPrompt: '',
           model: 'gpt-4o-mini',
           includeMessageHistory: true,
+          inheritParentSystemPrompt: false,
           mcpServers: {},
           toolNames: ['write_file', 'run_terminal_command'],
           spawnableAgents: [],
@@ -334,6 +320,7 @@ describe('mainPrompt', () => {
           spawnerPrompt: '',
           model: 'gpt-4o',
           includeMessageHistory: true,
+          inheritParentSystemPrompt: false,
           mcpServers: {},
           toolNames: ['write_file', 'run_terminal_command'],
           spawnableAgents: [],

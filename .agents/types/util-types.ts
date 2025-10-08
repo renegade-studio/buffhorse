@@ -142,6 +142,7 @@ const auxiliaryDataSchema = z.object({
     .union([z.literal('agentStep'), z.literal('userPrompt')])
     .optional(),
   keepDuringTruncation: z.boolean().optional(),
+  keepLastTags: z.string().array().optional(),
 })
 
 export const systemMessageSchema = z
@@ -184,22 +185,12 @@ export const toolMessageSchema = z
   .and(auxiliaryDataSchema)
 export type ToolMessage = z.infer<typeof toolMessageSchema>
 
-export const messageSchema = z
-  .union([
-    systemMessageSchema,
-    userMessageSchema,
-    assistantMessageSchema,
-    toolMessageSchema,
-  ])
-  .and(
-    z.object({
-      providerOptions: providerMetadataSchema.optional(),
-      timeToLive: z
-        .union([z.literal('agentStep'), z.literal('userPrompt')])
-        .optional(),
-      keepDuringTruncation: z.boolean().optional(),
-    }),
-  )
+export const messageSchema = z.union([
+  systemMessageSchema,
+  userMessageSchema,
+  assistantMessageSchema,
+  toolMessageSchema,
+])
 export type Message = z.infer<typeof messageSchema>
 
 // ===== MCP Server Types =====
@@ -212,6 +203,7 @@ export const mcpConfigStdioSchema = z.strictObject({
     .array()
     .default(() => []),
   env: z.record(z.string(), z.string()).default(() => ({})),
+  headers: z.record(z.string(), z.string()).default(() => ({})),
 })
 
 export const mcpConfigRemoteSchema = z.strictObject({
@@ -225,3 +217,13 @@ export const mcpConfigSchema = z.union([
   mcpConfigStdioSchema,
 ])
 export type MCPConfig = z.input<typeof mcpConfigSchema>
+
+// ============================================================================
+// Logger Interface
+// ============================================================================
+export interface Logger {
+  debug: (data: any, msg?: string) => void
+  info: (data: any, msg?: string) => void
+  warn: (data: any, msg?: string) => void
+  error: (data: any, msg?: string) => void
+}

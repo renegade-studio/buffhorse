@@ -14,26 +14,6 @@
  *   export default definition
  */
 
-import type * as Tools from './tools'
-import type {
-  Message,
-  ToolResultOutput,
-  JsonObjectSchema,
-  MCPConfig,
-} from './util-types'
-type ToolName = Tools.ToolName
-
-// ============================================================================
-// Logger Interface
-// ============================================================================
-
-export interface Logger {
-  debug: (data: any, msg?: string) => void
-  info: (data: any, msg?: string) => void
-  warn: (data: any, msg?: string) => void
-  error: (data: any, msg?: string) => void
-}
-
 // ============================================================================
 // Agent Definition and Utility Types
 // ============================================================================
@@ -112,13 +92,6 @@ export interface AgentDefinition {
     params?: JsonObjectSchema
   }
 
-  /** Whether to include conversation history from the parent agent in context.
-   *
-   * Defaults to false.
-   * Use this if the agent needs to know all the previous messages in the conversation.
-   */
-  includeMessageHistory?: boolean
-
   /** How the agent should output a response to its parent (defaults to 'last_message')
    *
    * last_message: The last message from the agent, typically after using tools.
@@ -140,6 +113,21 @@ export interface AgentDefinition {
    *
    * This field is key if the agent is intended to be spawned by other agents. */
   spawnerPrompt?: string
+
+  /** Whether to include conversation history from the parent agent in context.
+   *
+   * Defaults to false.
+   * Use this when the agent needs to know all the previous messages in the conversation.
+   */
+  includeMessageHistory?: boolean
+
+  /** Whether to inherit the parent agent's system prompt instead of using this agent's own systemPrompt.
+   *
+   * Defaults to false.
+   * Use this when you want to enable prompt caching by preserving the same system prompt prefix.
+   * Cannot be used together with the systemPrompt field.
+   */
+  inheritParentSystemPrompt?: boolean
 
   /** Background information for the agent. Fairly optional. Prefer using instructionsPrompt for agent instructions. */
   systemPrompt?: string
@@ -263,21 +251,17 @@ export type ToolCall<T extends ToolName = ToolName> = {
 /**
  * File operation tools
  */
-export type FileTools =
-  | 'read_files'
-  | 'write_file'
-  | 'str_replace'
-  | 'find_files'
+export type FileEditingTools = 'read_files' | 'write_file' | 'str_replace'
 
 /**
  * Code analysis tools
  */
-export type CodeAnalysisTools = 'code_search' | 'find_files'
+export type CodeAnalysisTools = 'code_search' | 'find_files' | 'read_files'
 
 /**
  * Terminal and system tools
  */
-export type TerminalTools = 'run_terminal_command' | 'run_file_change_hooks'
+export type TerminalTools = 'run_terminal_command' | 'code_search'
 
 /**
  * Web and browser tools
@@ -287,24 +271,12 @@ export type WebTools = 'web_search' | 'read_docs'
 /**
  * Agent management tools
  */
-export type AgentTools = 'spawn_agents' | 'set_messages' | 'add_message'
-
-/**
- * Planning and organization tools
- */
-export type PlanningTools = 'think_deeply'
+export type AgentTools = 'spawn_agents'
 
 /**
  * Output and control tools
  */
-export type OutputTools = 'set_output' | 'end_turn'
-
-/**
- * Common tool combinations for convenience
- */
-export type FileEditingTools = FileTools | 'end_turn'
-export type ResearchTools = WebTools | 'write_file' | 'end_turn'
-export type CodeAnalysisToolSet = FileTools | CodeAnalysisTools | 'end_turn'
+export type OutputTools = 'set_output'
 
 // ============================================================================
 // Available Models (see: https://openrouter.ai/models)
@@ -325,21 +297,27 @@ export type ModelName =
   | 'openai/gpt-5-nano'
 
   // Anthropic
-  | 'anthropic/claude-4-sonnet-20250522'
+  | 'anthropic/claude-sonnet-4.5'
   | 'anthropic/claude-opus-4.1'
 
   // Gemini
   | 'google/gemini-2.5-pro'
   | 'google/gemini-2.5-flash'
   | 'google/gemini-2.5-flash-lite'
+  | 'google/gemini-2.5-flash-preview-09-2025'
+  | 'google/gemini-2.5-flash-lite-preview-09-2025'
 
   // X-AI
   | 'x-ai/grok-4-07-09'
+  | 'x-ai/grok-4-fast'
   | 'x-ai/grok-code-fast-1'
 
   // Qwen
+  | 'qwen/qwen3-max'
+  | 'qwen/qwen3-coder-plus'
   | 'qwen/qwen3-coder'
   | 'qwen/qwen3-coder:nitro'
+  | 'qwen/qwen3-coder-flash'
   | 'qwen/qwen3-235b-a22b-2507'
   | 'qwen/qwen3-235b-a22b-2507:nitro'
   | 'qwen/qwen3-235b-a22b-thinking-2507'
@@ -356,8 +334,18 @@ export type ModelName =
   // Other open source models
   | 'moonshotai/kimi-k2'
   | 'moonshotai/kimi-k2:nitro'
-  | 'z-ai/glm-4.5'
-  | 'z-ai/glm-4.5:nitro'
+  | 'z-ai/glm-4.6'
+  | 'z-ai/glm-4.6:nitro'
   | (string & {})
 
 export type { Tools }
+
+import type * as Tools from './tools'
+import type {
+  Message,
+  ToolResultOutput,
+  JsonObjectSchema,
+  MCPConfig,
+  Logger,
+} from './util-types'
+type ToolName = Tools.ToolName

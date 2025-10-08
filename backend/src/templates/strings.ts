@@ -12,6 +12,7 @@ import {
   getSystemInfoPrompt,
 } from '../system-prompt/prompts'
 import {
+  fullToolList,
   getShortToolInstructions,
   getToolsInstructions,
 } from '../tools/prompts'
@@ -110,10 +111,11 @@ export async function formatPrompt({
 }
 type StringField = 'systemPrompt' | 'instructionsPrompt' | 'stepPrompt'
 
-export async function collectParentInstructions(
-  agentType: string,
-  agentTemplates: Record<string, AgentTemplate>,
-): Promise<string[]> {
+export async function collectParentInstructions(params: {
+  agentType: string
+  agentTemplates: Record<string, AgentTemplate>
+}): Promise<string[]> {
+  const { agentType, agentTemplates } = params
   const instructions: string[] = []
 
   for (const template of Object.values(agentTemplates)) {
@@ -161,7 +163,7 @@ export async function getAgentPrompt<T extends StringField>({
     return undefined
   }
 
-  const prompt = await formatPrompt({
+  let prompt = await formatPrompt({
     prompt: promptValue,
     fileContext,
     agentState,
@@ -173,24 +175,32 @@ export async function getAgentPrompt<T extends StringField>({
 
   let addendum = ''
 
+  if (promptType.type === 'stepPrompt' && agentState.agentType) {
+    // Put step prompt within a system_reminder tag so agent doesn't think the user just spoke again.
+    prompt = `<system_reminder>${prompt}</system_reminder>`
+  }
+
   // Add tool instructions, spawnable agents, and output schema prompts to instructionsPrompt
   if (promptType.type === 'instructionsPrompt' && agentState.agentType) {
+    const toolsInstructions = agentTemplate.inheritParentSystemPrompt
+      ? fullToolList(agentTemplate.toolNames, await additionalToolDefinitions())
+      : getShortToolInstructions(
+          agentTemplate.toolNames,
+          await additionalToolDefinitions(),
+        )
     addendum +=
       '\n\n' +
-      getShortToolInstructions(
-        agentTemplate.toolNames,
-        await additionalToolDefinitions(),
-      ) +
+      toolsInstructions +
       '\n\n' +
       (await buildSpawnableAgentsDescription(
         agentTemplate.spawnableAgents,
         agentTemplates,
       ))
 
-    const parentInstructions = await collectParentInstructions(
-      agentState.agentType,
+    const parentInstructions = await collectParentInstructions({
+      agentType: agentState.agentType,
       agentTemplates,
-    )
+    })
 
     if (parentInstructions.length > 0) {
       addendum += '\n\n## Additional Instructions for Spawning Agents\n\n'

@@ -58,10 +58,10 @@ async function runTraces() {
 
               if (model.startsWith('claude')) {
                 output = await promptAiSdk({
-                  messages: messagesWithSystem(
-                    messages as Message[],
-                    system as System,
-                  ),
+                  messages: messagesWithSystem({
+                    messages: messages as Message[],
+                    system: system as System,
+                  }),
                   model: model as typeof models.openrouter_claude_sonnet_4,
                   clientSessionId: 'relabel-trace-run',
                   fingerprintId: 'relabel-trace-run',
@@ -70,9 +70,13 @@ async function runTraces() {
                 })
               } else {
                 output = await promptFlashWithFallbacks(
-                  messagesWithSystem(messages as Message[], system as System),
+                  messagesWithSystem({
+                    messages: messages as Message[],
+                    system: system as System,
+                  }),
                   {
-                    model: model as typeof models.gemini2_5_pro_preview,
+                    model:
+                      model as typeof models.openrouter_gemini2_5_pro_preview,
                     clientSessionId: 'relabel-trace-run',
                     fingerprintId: 'relabel-trace-run',
                     userInputId: 'relabel-trace-run',
@@ -98,7 +102,11 @@ async function runTraces() {
 
               // Store the relabel
               try {
-                await insertRelabel(relabel, DATASET)
+                await insertRelabel({
+                  relabel,
+                  dataset: DATASET,
+                  logger: console,
+                })
               } catch (error) {
                 console.error(
                   `Error inserting relabel for trace ${trace.id}:`,

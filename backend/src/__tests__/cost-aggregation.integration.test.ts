@@ -48,7 +48,8 @@ const mockFileContext: ProjectFileContext = {
       inputSchema: {},
       spawnerPrompt: '',
       model: 'gpt-4o-mini',
-      includeMessageHistory: true,
+      includeMessageHistory: false,
+      inheritParentSystemPrompt: false,
       toolNames: ['spawn_agents'],
       spawnableAgents: ['editor'],
       systemPrompt: 'Base agent system prompt',
@@ -63,9 +64,10 @@ const mockFileContext: ProjectFileContext = {
       spawnerPrompt: '',
       model: 'gpt-4o-mini',
       includeMessageHistory: true,
+      inheritParentSystemPrompt: false,
       toolNames: ['write_file'],
       spawnableAgents: [],
-      systemPrompt: 'Editor agent system prompt',
+      systemPrompt: '',
       instructionsPrompt: 'Editor agent instructions',
       stepPrompt: 'Editor agent step prompt',
     },
@@ -139,7 +141,8 @@ describe('Cost Aggregation Integration Tests', () => {
         inputSchema: {},
         spawnerPrompt: '',
         model: 'gpt-4o-mini',
-        includeMessageHistory: true,
+        includeMessageHistory: false,
+        inheritParentSystemPrompt: false,
         mcpServers: {},
         toolNames: ['spawn_agents'],
         spawnableAgents: ['editor'],
@@ -155,10 +158,11 @@ describe('Cost Aggregation Integration Tests', () => {
         spawnerPrompt: '',
         model: 'gpt-4o-mini',
         includeMessageHistory: true,
+        inheritParentSystemPrompt: false,
         mcpServers: {},
         toolNames: ['write_file'],
         spawnableAgents: [],
-        systemPrompt: 'Editor agent system prompt',
+        systemPrompt: '',
         instructionsPrompt: 'Editor agent instructions',
         stepPrompt: 'Editor agent step prompt',
       } satisfies AgentTemplate,
@@ -233,9 +237,9 @@ describe('Cost Aggregation Integration Tests', () => {
 
     // Mock file reading
     spyOn(websocketAction, 'requestFiles').mockImplementation(
-      async (ws, paths) => {
+      async (params: { ws: any; filePaths: string[] }) => {
         const results: Record<string, string | null> = {}
-        paths.forEach((path) => {
+        params.filePaths.forEach((path) => {
           results[path] = path === 'hello.txt' ? 'Hello, World!' : null
         })
         return results

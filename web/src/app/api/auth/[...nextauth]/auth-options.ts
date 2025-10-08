@@ -67,7 +67,12 @@ async function createAndLinkStripeCustomer(
       { userId, error },
       'Failed to create Stripe customer or update user record.'
     )
-    await logSyncFailure(userId, errorMessage)
+    await logSyncFailure({
+      id: userId,
+      errorMessage,
+      provider: 'stripe',
+      logger,
+    })
     return null
   }
 }
@@ -107,7 +112,12 @@ async function createInitialCreditGrant(
       { userId, error: grantError },
       'Failed to create initial credit grant.'
     )
-    await logSyncFailure(userId, errorMessage)
+    await logSyncFailure({
+      id: userId,
+      errorMessage,
+      provider: 'stripe',
+      logger,
+    })
   }
 }
 
@@ -231,7 +241,11 @@ export const authOptions: NextAuthOptions = {
         userData.name
       )
 
-      trackEvent(AnalyticsEvent.SIGNUP, userData.id)
+      trackEvent({
+        event: AnalyticsEvent.SIGNUP,
+        userId: userData.id,
+        logger,
+      })
 
       logger.info({ user }, 'createUser event processing finished.')
     },

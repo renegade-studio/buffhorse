@@ -7,6 +7,8 @@ import {
   toolNameParam,
 } from '@codebuff/common/tools/constants'
 
+import { logger } from './util/logger'
+
 import type { StreamChunk } from './llm-apis/vercel-ai-sdk/ai-sdk'
 import type { Model } from '@codebuff/common/old-constants'
 import type {
@@ -72,10 +74,10 @@ export async function* processStreamWithTags(
     try {
       parsedParams = JSON.parse(contents)
     } catch (error: any) {
-      trackEvent(
-        AnalyticsEvent.MALFORMED_TOOL_CALL_JSON,
-        loggerOptions?.userId ?? '',
-        {
+      trackEvent({
+        event: AnalyticsEvent.MALFORMED_TOOL_CALL_JSON,
+        userId: loggerOptions?.userId ?? '',
+        properties: {
           contents: JSON.stringify(contents),
           model: loggerOptions?.model,
           agent: loggerOptions?.agentName,
@@ -86,7 +88,8 @@ export async function* processStreamWithTags(
           },
           autocompleted,
         },
-      )
+        logger,
+      })
       const shortenedContents =
         contents.length < 200
           ? contents
@@ -101,28 +104,42 @@ export async function* processStreamWithTags(
     }
 
     const toolName = parsedParams[toolNameParam] as keyof typeof processors
-    const processor = processors[toolName] ?? defaultProcessor(toolName)
+    const processor =
+      typeof toolName === 'string'
+        ? processors[toolName] ?? defaultProcessor(toolName)
+        : undefined
     if (!processor) {
-      trackEvent(
-        AnalyticsEvent.UNKNOWN_TOOL_CALL,
-        loggerOptions?.userId ?? '',
-        {
+      trackEvent({
+        event: AnalyticsEvent.UNKNOWN_TOOL_CALL,
+        userId: loggerOptions?.userId ?? '',
+        properties: {
           contents,
           toolName,
           model: loggerOptions?.model,
           agent: loggerOptions?.agentName,
           autocompleted,
         },
+        logger,
+      })
+      onError(
+        'parse_error',
+        `Unknown tool ${JSON.stringify(toolName)} for tool call: ${contents}`,
       )
+      return
     }
 
-    trackEvent(AnalyticsEvent.TOOL_USE, loggerOptions?.userId ?? '', {
-      toolName,
-      contents,
-      parsedParams,
-      autocompleted,
-      model: loggerOptions?.model,
-      agent: loggerOptions?.agentName,
+    trackEvent({
+      event: AnalyticsEvent.TOOL_USE,
+      userId: loggerOptions?.userId ?? '',
+      properties: {
+        toolName,
+        contents,
+        parsedParams,
+        autocompleted,
+        model: loggerOptions?.model,
+        agent: loggerOptions?.agentName,
+      },
+      logger,
     })
     delete parsedParams[toolNameParam]
 
@@ -130,12 +147,21 @@ export async function* processStreamWithTags(
     processor.onTagEnd(toolName, parsedParams)
   }
 
-  function extractToolsFromBufferAndProcess() {
+  function extractToolsFromBufferAndProcess(forceFlush = false) {
     const matches = extractToolCalls()
     matches.forEach(processToolCallContents)
+    if (forceFlush) {
+      onResponseChunk({
+        type: 'text',
+        text: buffer,
+      })
+      buffer = ''
+    }
   }
 
-  function* processChunk(chunk: StreamChunk | undefined) {
+  function* processChunk(
+    chunk: StreamChunk | undefined,
+  ): Generator<StreamChunk> {
     if (chunk !== undefined && chunk.type === 'text') {
       buffer += chunk.text
     }
@@ -151,7 +177,7 @@ export async function* processStreamWithTags(
         }
         autocompleted = true
       }
-      extractToolsFromBufferAndProcess()
+      extractToolsFromBufferAndProcess(true)
     }
 
     if (chunk) {

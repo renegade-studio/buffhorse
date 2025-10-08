@@ -11,17 +11,18 @@ import { countTokens, countTokensJson } from '../util/token-counter'
 
 import type { ProjectFileContext } from '@codebuff/common/util/file'
 
-export function getSearchSystemPrompt(
-  fileContext: ProjectFileContext,
-  messagesTokens: number,
+export function getSearchSystemPrompt(params: {
+  fileContext: ProjectFileContext
+  messagesTokens: number
   options: {
     agentStepId: string
     clientSessionId: string
     fingerprintId: string
     userInputId: string
     userId: string | undefined
-  },
-): string {
+  }
+}): string {
+  const { fileContext, messagesTokens, options } = params
   const startTime = Date.now()
 
   const maxTokens = 500_000 // costMode === 'lite' ? 64_000 :
@@ -70,7 +71,7 @@ export function getSearchSystemPrompt(
     },
   }
 
-  insertTrace(trace).catch((error: Error) => {
+  insertTrace({ trace, logger }).catch((error: Error) => {
     logger.error({ error }, 'Failed to insert file trees trace')
   })
   const fileTreeTokens = countTokensJson(projectFileTreePrompt)

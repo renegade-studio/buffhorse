@@ -1,17 +1,13 @@
 import { insertTrace } from '@codebuff/bigquery'
 import { trackEvent } from '@codebuff/common/analytics'
 import { AnalyticsEvent } from '@codebuff/common/constants/analytics-events'
-import {
-  ASYNC_AGENTS_ENABLED,
-  supportsCacheControl,
-} from '@codebuff/common/old-constants'
+import { supportsCacheControl } from '@codebuff/common/old-constants'
 import { TOOLS_WHICH_WONT_FORCE_NEXT_STEP } from '@codebuff/common/tools/constants'
 import { buildArray } from '@codebuff/common/util/array'
 import { getErrorObject } from '@codebuff/common/util/error'
 import { cloneDeep } from 'lodash'
 
 import { addAgentStep, finishAgentRun, startAgentRun } from './agent-run'
-import { asyncAgentManager } from './async-agent-manager'
 import { checkLiveUserInput } from './live-user-inputs'
 import { getMCPToolData } from './mcp/util'
 import { getAgentStreamFromTemplate } from './prompt-agent-stream'
@@ -89,6 +85,7 @@ export interface AgentOptions {
 
   prompt: string | undefined
   params: Record<string, any> | undefined
+  system: string
 }
 
 export const runAgentStep = async (
@@ -111,6 +108,7 @@ export const runAgentStep = async (
     localAgentTemplates,
     prompt,
     params,
+    system,
   } = options
   let agentState = options.agentState
 
@@ -124,13 +122,18 @@ export const runAgentStep = async (
   // Generates a unique ID for each main prompt run (ie: a step of the agent loop)
   // This is used to link logs within a single agent loop
   const agentStepId = crypto.randomUUID()
-  trackEvent(AnalyticsEvent.AGENT_STEP, userId ?? '', {
-    agentStepId,
-    clientSessionId,
-    fingerprintId,
-    userInputId,
-    userId,
-    repoName: repoId,
+  trackEvent({
+    event: AnalyticsEvent.AGENT_STEP,
+    userId: userId ?? '',
+    properties: {
+      agentStepId,
+      clientSessionId,
+      fingerprintId,
+      userInputId,
+      userId,
+      repoName: repoId,
+    },
+    logger,
   })
 
   let messageHistory = agentState.messageHistory
@@ -164,27 +167,6 @@ export const runAgentStep = async (
           ),
         },
       ],
-    }
-  }
-
-  if (ASYNC_AGENTS_ENABLED) {
-    // Register this agent in the async manager so it can receive messages
-    const isRegistered = asyncAgentManager.getAgent(agentState.agentId)
-    if (!isRegistered && userId) {
-      asyncAgentManager.registerAgent({
-        agentState,
-        sessionId: clientSessionId,
-        userId,
-        fingerprintId,
-        userInputId,
-        ws,
-        fileContext,
-        startTime: new Date(),
-        status: 'running',
-      })
-    } else {
-      // Update status to running for existing agents
-      asyncAgentManager.updateAgentState(agentState, 'running')
     }
   }
 
@@ -271,30 +253,6 @@ export const runAgentStep = async (
   })
 
   const iterationNum = agentState.messageHistory.length
-
-  const system =
-    (await getAgentPrompt({
-      agentTemplate,
-      promptType: { type: 'systemPrompt' },
-      fileContext,
-      agentState,
-      agentTemplates: localAgentTemplates,
-      additionalToolDefinitions: () => {
-        const additionalToolDefinitions = cloneDeep(
-          Object.fromEntries(
-            Object.entries(fileContext.customToolDefinitions).filter(
-              ([toolName]) => agentTemplate.toolNames.includes(toolName),
-            ),
-          ),
-        )
-        return getMCPToolData({
-          ws,
-          toolNames: agentTemplate.toolNames,
-          mcpServers: agentTemplate.mcpServers,
-          writeTo: additionalToolDefinitions,
-        })
-      },
-    })) ?? ''
   const systemTokens = countTokensJson(system)
 
   const agentMessages = agentState.messageHistory
@@ -319,7 +277,9 @@ export const runAgentStep = async (
   let fullResponse = ''
   const toolResults: ToolResultPart[] = []
 
-  const stream = getStream(messagesWithSystem(agentMessages, system))
+  const stream = getStream(
+    messagesWithSystem({ messages: agentMessages, system }),
+  )
 
   const {
     toolCalls,
@@ -327,7 +287,6 @@ export const runAgentStep = async (
     state,
     fullResponse: fullResponseAfterStream,
     fullResponseChunks,
-    messageId,
   } = await processStreamWithTools({
     stream,
     ws,
@@ -339,6 +298,7 @@ export const runAgentStep = async (
     agentState,
     repoId,
     messages: agentMessages,
+    system,
     agentTemplate,
     localAgentTemplates,
     fileContext,
@@ -364,7 +324,7 @@ export const runAgentStep = async (
     },
   }
 
-  insertTrace(agentResponseTrace)
+  insertTrace({ trace: agentResponseTrace, logger })
 
   const newAgentContext = state.agentContext as AgentState['agentContext']
   // Use the updated agent state from tool execution
@@ -408,11 +368,6 @@ export const runAgentStep = async (
     agentContext: newAgentContext,
   }
 
-  // Mark agent as completed if it should end turn
-  if (ASYNC_AGENTS_ENABLED && shouldEndTurn) {
-    asyncAgentManager.updateAgentState(agentState, 'completed')
-  }
-
   logger.debug(
     {
       iteration: iterationNum,
@@ -435,7 +390,7 @@ export const runAgentStep = async (
     agentState,
     fullResponse,
     shouldEndTurn,
-    messageId,
+    messageId: null,
   }
 }
 
@@ -455,6 +410,7 @@ export const loopAgentSteps = async (
     clientSessionId,
     onResponseChunk,
     clearUserPromptMessagesAfterResponse = true,
+    parentSystemPrompt,
   }: {
     userInputId: string
     agentType: AgentTemplateType
@@ -466,6 +422,7 @@ export const loopAgentSteps = async (
     fileContext: ProjectFileContext
     localAgentTemplates: Record<string, AgentTemplate>
     clearUserPromptMessagesAfterResponse?: boolean
+    parentSystemPrompt?: string
 
     userId: string | undefined
     clientSessionId: string
@@ -487,6 +444,7 @@ export const loopAgentSteps = async (
     userId,
     agentId: agentTemplate.id,
     ancestorRunIds: agentState.ancestorRunIds,
+    logger,
   })
 
   // Initialize message history with user prompt and instructions on first iteration
@@ -521,6 +479,33 @@ export const loopAgentSteps = async (
     : undefined
 
   // Build the initial message history with user prompt and instructions
+  // Generate system prompt once, using parent's if inheritParentSystemPrompt is true
+  const system =
+    agentTemplate.inheritParentSystemPrompt && parentSystemPrompt
+      ? parentSystemPrompt
+      : (await getAgentPrompt({
+          agentTemplate,
+          promptType: { type: 'systemPrompt' },
+          fileContext,
+          agentState,
+          agentTemplates: localAgentTemplates,
+          additionalToolDefinitions: () => {
+            const additionalToolDefinitions = cloneDeep(
+              Object.fromEntries(
+                Object.entries(fileContext.customToolDefinitions).filter(
+                  ([toolName]) => agentTemplate.toolNames.includes(toolName),
+                ),
+              ),
+            )
+            return getMCPToolData({
+              ws,
+              toolNames: agentTemplate.toolNames,
+              mcpServers: agentTemplate.mcpServers,
+              writeTo: additionalToolDefinitions,
+            })
+          },
+        })) ?? ''
+
   const initialMessages = buildArray<Message>(
     ...agentState.messageHistory,
 
@@ -545,8 +530,7 @@ export const loopAgentSteps = async (
     instructionsPrompt && {
       role: 'user' as const,
       content: instructionsPrompt,
-      timeToLive: 'userPrompt' as const,
-      keepDuringTruncation: true,
+      keepLastTags: ['INSTRUCTIONS_PROMPT'],
     },
   )
 
@@ -555,6 +539,7 @@ export const loopAgentSteps = async (
     messageHistory: initialMessages,
   }
   let shouldEndTurn = false
+  let hasRetriedOutputSchema = false
   let currentPrompt = prompt
   let currentParams = params
   let totalSteps = 0
@@ -563,6 +548,17 @@ export const loopAgentSteps = async (
     while (true) {
       totalSteps++
       if (!checkLiveUserInput(userId, userInputId, clientSessionId)) {
+        logger.warn(
+          {
+            userId,
+            userInputId,
+            clientSessionId,
+            totalSteps,
+            runId,
+            agentState,
+          },
+          'User input no longer live (likely cancelled)',
+        )
         break
       }
 
@@ -586,6 +582,7 @@ export const loopAgentSteps = async (
           localAgentTemplates,
           prompt: currentPrompt,
           params: currentParams,
+          system,
           stepsComplete: shouldEndTurn,
           stepNumber: totalSteps,
         })
@@ -597,12 +594,39 @@ export const loopAgentSteps = async (
         }
       }
 
-      if (ASYNC_AGENTS_ENABLED) {
-        const hasMessages =
-          asyncAgentManager.getMessages(agentState.agentId).length > 0
-        if (hasMessages) {
-          shouldEndTurn = false
-        }
+      // Check if output is required but missing
+      if (
+        agentTemplate.outputSchema &&
+        currentAgentState.output === undefined &&
+        shouldEndTurn &&
+        !hasRetriedOutputSchema
+      ) {
+        hasRetriedOutputSchema = true
+        logger.warn(
+          {
+            agentType,
+            agentId: currentAgentState.agentId,
+            runId,
+          },
+          'Agent finished without setting required output, restarting loop',
+        )
+
+        // Add system message instructing to use set_output
+        const outputSchemaMessage = asSystemMessage(
+          `You must use the "set_output" tool to provide a result that matches the output schema before ending your turn. The output schema is required for this agent.`,
+        )
+
+        currentAgentState.messageHistory = [
+          ...currentAgentState.messageHistory,
+          {
+            role: 'user',
+            content: outputSchemaMessage,
+            keepDuringTruncation: true,
+          },
+        ]
+
+        // Reset shouldEndTurn to continue the loop
+        shouldEndTurn = false
       }
 
       // End turn if programmatic step ended turn, or if the previous runAgentStep ended turn
@@ -628,6 +652,7 @@ export const loopAgentSteps = async (
         agentState: currentAgentState,
         prompt: currentPrompt,
         params: currentParams,
+        system,
       })
 
       if (newAgentState.runId) {
@@ -640,6 +665,7 @@ export const loopAgentSteps = async (
           messageId,
           status: 'completed',
           startTime,
+          logger,
         })
       } else {
         logger.error('No runId found for agent state after finishing agent run')
@@ -669,6 +695,7 @@ export const loopAgentSteps = async (
       totalSteps,
       directCredits: currentAgentState.directCreditsUsed,
       totalCredits: currentAgentState.creditsUsed,
+      logger,
     })
 
     return {
@@ -679,7 +706,11 @@ export const loopAgentSteps = async (
     logger.error(
       {
         error: getErrorObject(error),
+        agentType,
         agentId: currentAgentState.agentId,
+        runId,
+        totalSteps,
+        directCreditsUsed: currentAgentState.directCreditsUsed,
         creditsUsed: currentAgentState.creditsUsed,
       },
       'Agent execution failed',
@@ -697,6 +728,7 @@ export const loopAgentSteps = async (
       directCredits: currentAgentState.directCreditsUsed,
       totalCredits: currentAgentState.creditsUsed,
       errorMessage,
+      logger,
     })
 
     const errorObject = getErrorObject(error)

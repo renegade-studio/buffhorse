@@ -129,9 +129,9 @@ export const handleWriteFile = (({
     ? previousEdit.then((maybeResult) =>
         maybeResult && 'content' in maybeResult
           ? maybeResult.content
-          : requestOptionalFile(ws, path),
+          : requestOptionalFile({ ws, filePath: path }),
       )
-    : requestOptionalFile(ws, path)
+    : requestOptionalFile({ ws, filePath: path })
 
   const fileContentWithoutStartNewline = content.startsWith('\n')
     ? content.slice(1)
@@ -139,19 +139,19 @@ export const handleWriteFile = (({
 
   logger.debug({ path, content }, `write_file ${path}`)
 
-  const newPromise = processFileBlock(
+  const newPromise = processFileBlock({
     path,
     instructions,
-    latestContentPromise,
-    fileContentWithoutStartNewline,
-    agentMessagesUntruncated,
-    fullResponse ?? '',
-    prompt,
+    initialContentPromise: latestContentPromise,
+    newContent: fileContentWithoutStartNewline,
+    messages: agentMessagesUntruncated,
+    fullResponse: fullResponse ?? '',
+    lastUserPrompt: prompt,
     clientSessionId,
     fingerprintId,
     userInputId,
     userId,
-  )
+  })
     .catch((error) => {
       logger.error(error, 'Error processing write_file block')
       return {
@@ -230,7 +230,7 @@ export async function postStreamProcessing<T extends FileProcessingTools>(
   if (errors.length > 0) {
     if (errors.length > 1) {
       throw new Error(
-        `Internal error: Unexpected number of matching errors for ${{ toolCall }}, found ${errors.length}, expected 1`,
+        `Internal error: Unexpected number of matching errors for ${JSON.stringify(toolCall)}, found ${errors.length}, expected 1`,
       )
     }
 
@@ -251,7 +251,7 @@ export async function postStreamProcessing<T extends FileProcessingTools>(
   )
   if (changes.length !== 1) {
     throw new Error(
-      `Internal error: Unexpected number of matching changes for ${{ toolCall }}, found ${changes.length}, expected 1`,
+      `Internal error: Unexpected number of matching changes for ${JSON.stringify(toolCall)}, found ${changes.length}, expected 1`,
     )
   }
 

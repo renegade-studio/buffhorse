@@ -30,7 +30,6 @@ import {
   REQUEST_CREDIT_SHOW_THRESHOLD,
   SHOULD_ASK_CONFIG,
   UserState,
-  ASYNC_AGENTS_ENABLED,
   API_KEY_ENV_VAR,
 } from '@codebuff/common/old-constants'
 import { getInitialSessionState } from '@codebuff/common/types/session-state'
@@ -209,7 +208,6 @@ export class Client {
   private costMode: CostMode
   private responseComplete: boolean = false
   private userInputId: string | undefined
-  private nonCancelledUserInputIds: string[] = []
   private currentOnChunk: ((chunk: string | PrintModeEvent) => void) | undefined
 
   public usageData: UsageData = {
@@ -808,9 +806,8 @@ export class Client {
       const { requestId, toolName, input, userInputId, mcpConfig } = action
 
       // Check if the userInputId matches or is from a spawned agent
-      const isValidUserInput = ASYNC_AGENTS_ENABLED
-        ? this.nonCancelledUserInputIds.some((id) => userInputId.startsWith(id))
-        : this.userInputId && userInputId.startsWith(this.userInputId)
+      const isValidUserInput =
+        this.userInputId && userInputId.startsWith(this.userInputId)
 
       if (!isValidUserInput) {
         logger.warn(
@@ -818,7 +815,6 @@ export class Client {
             requestId,
             toolName,
             currentUserInputId: this.userInputId,
-            nonCancelledUserInputIds: this.nonCancelledUserInputIds,
             receivedUserInputId: userInputId,
           },
           'User input ID mismatch - rejecting tool call request',
@@ -831,9 +827,7 @@ export class Client {
             {
               type: 'json',
               value: {
-                errorMessage: ASYNC_AGENTS_ENABLED
-                  ? `User input ID mismatch: expected one of ${this.nonCancelledUserInputIds.join(', ')}, got ${userInputId}. That user input id might have been cancelled by the user.`
-                  : `User input ID mismatch: expected ${this.userInputId}, got ${userInputId}. Most likely cancelled by user.`,
+                errorMessage: `User input ID mismatch: expected ${this.userInputId}, got ${userInputId}. Most likely cancelled by user.`,
               },
             },
           ],
@@ -1131,9 +1125,6 @@ export class Client {
     loggerContext.clientRequestId = userInputId
     const startTime = Date.now() // Capture start time
 
-    // Add to non-cancelled list
-    this.nonCancelledUserInputIds.push(userInputId)
-
     const f = this.subscribeToResponse.bind(this)
 
     const { responsePromise, stopResponse } = f(
@@ -1319,11 +1310,6 @@ export class Client {
       return
     }
 
-    // Remove the cancelled input ID from the non-cancelled list
-    this.nonCancelledUserInputIds = this.nonCancelledUserInputIds.filter(
-      (id) => id !== this.userInputId,
-    )
-
     sendActionAndHandleError(this.webSocket, {
       type: 'cancel-user-input',
       authToken: this.user?.authToken,
@@ -1361,6 +1347,8 @@ export class Client {
       unsubscribeComplete()
       this.cancelCurrentInput()
       this.currentOnChunk = undefined
+
+      xmlStreamParser.destroy()
 
       const additionalMessages = prompt
         ? [
@@ -1452,31 +1440,15 @@ export class Client {
     unsubscribeComplete = this.webSocket.subscribe(
       'prompt-response',
       async (action) => {
-        const parsedAction = PromptResponseSchema.safeParse(action)
-        if (!parsedAction.success) {
-          const message = [
-            'Received invalid prompt response from server:',
-            JSON.stringify(parsedAction.error.issues),
-            'If this issues persists, please contact support@codebuff.com',
-          ].join('\n')
-          console.error(message)
-          logger.error(
-            {
-              errorMessage: message,
-              action,
-              eventId: AnalyticsEvent.MALFORMED_PROMPT_RESPONSE,
-            },
-            'Malformed prompt response',
-          )
-          return
-        }
+        // Stop enforcing prompt response schema (e.g. PromptResponseSchema.parse(action))!
+        // It's a black box we will pass back to the server.
+
         if (action.promptId !== userInputId) return
-        const a = parsedAction.data
         this.responseComplete = true
 
         Spinner.get().stop()
 
-        this.sessionState = a.sessionState
+        this.sessionState = action.sessionState
         const toolResults: ToolResultPart[] = []
 
         stepsCount++
@@ -1543,8 +1515,8 @@ Go to https://www.codebuff.com/config for more information.`) +
         }
 
         // Print structured output as JSON if available
-        if (a.output?.type === 'structuredOutput') {
-          console.log('\n' + JSON.stringify(a.output.value, null, 2))
+        if (action.output?.type === 'structuredOutput') {
+          console.log('\n' + JSON.stringify(action.output.value, null, 2))
         }
 
         if (DiffManager.getChanges().length > 0) {
@@ -1578,15 +1550,13 @@ Go to https://www.codebuff.com/config for more information.`) +
         // Always cleanup xmlStreamParser to prevent memory leaks and MaxListenersExceededWarning
         xmlStreamParser.end()
 
-        if (!ASYNC_AGENTS_ENABLED) {
-          unsubscribeChunks()
-          unsubscribeComplete()
-        }
+        unsubscribeChunks()
+        unsubscribeComplete()
 
         // Clear the onChunk callback when response is complete
         this.currentOnChunk = undefined
 
-        resolveResponse({ ...a, wasStoppedByUser: false })
+        resolveResponse({ ...action, wasStoppedByUser: false })
       },
     )
 
