@@ -158,6 +158,16 @@ export async function processFileBlock(
     }
   }
 
+  if (
+    updatedContent.trim().length === 0 &&
+    normalizeLineEndings(newContent).trim().length > 0
+  ) {
+    logger.warn(
+      { path, editSnippet: newContent },
+      'fastRewrite returned empty content, but snippet was not empty. Falling back to treating snippet as whole file.',
+    )
+    updatedContent = normalizeLineEndings(newContent)
+  }
   let patch = createPatch(path, normalizedInitialContent, updatedContent)
   const lines = patch.split('\n')
   const hunkStartIndex = lines.findIndex((line) => line.startsWith('@@'))

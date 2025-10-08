@@ -15,6 +15,7 @@ export const getAgentStreamFromTemplate = (params: {
   onCostCalculated?: (credits: number) => Promise<void>
   agentId?: string
   includeCacheControl?: boolean
+  provider?: string
 
   template: AgentTemplate
 }) => {
@@ -26,6 +27,7 @@ export const getAgentStreamFromTemplate = (params: {
     onCostCalculated,
     agentId,
     includeCacheControl,
+    provider,
     template,
   } = params
 
@@ -39,6 +41,7 @@ export const getAgentStreamFromTemplate = (params: {
     const options: Parameters<typeof promptAiSdkStream>[0] = {
       messages,
       model,
+      provider,
       stopSequences: [globalStopSequence],
       clientSessionId,
       fingerprintId,
@@ -52,13 +55,15 @@ export const getAgentStreamFromTemplate = (params: {
 
     // Add Gemini-specific options if needed
     const primaryModel = Array.isArray(model) ? model[0] : model
-    const provider =
+    const derivedProvider =
       providerModelNames[primaryModel as keyof typeof providerModelNames]
+
+    const finalProvider = provider ?? derivedProvider
 
     if (!options.providerOptions) {
       options.providerOptions = {}
     }
-    if (provider === 'gemini') {
+    if (finalProvider === 'gemini') {
       if (!options.providerOptions.gemini) {
         options.providerOptions.gemini = {}
       }

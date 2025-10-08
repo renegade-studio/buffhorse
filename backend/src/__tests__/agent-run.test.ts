@@ -1,58 +1,72 @@
-import db from '@codebuff/common/db'
-import * as schema from '@codebuff/common/db/schema'
-import {
-  mockModule,
-  clearMockedModules,
-} from '@codebuff/common/testing/mock-modules'
 import {
   spyOn,
   beforeEach,
   afterEach,
-  afterAll,
   describe,
   expect,
   it,
   mock,
-  beforeAll,
 } from 'bun:test'
 
+// Mock environment validation to prevent errors in the test environment
+mock.module('@t3-oss/env-nextjs', () => ({
+  createEnv: () => {},
+}))
+
+// Mock dependencies BEFORE they are imported by other modules
+const mockInsert = mock(() => ({
+  values: mock(() => Promise.resolve([{ id: 'test-run-id' }])),
+}))
+const mockUpdate = mock(() => ({
+  set: mock((vals: any) => ({
+    where: mock(() => Promise.resolve()),
+  })),
+}))
+
+mock.module('@codebuff/common/db', () => ({
+  default: {
+    insert: mockInsert,
+    update: mockUpdate,
+  },
+}))
+
+const mockLoggerError = mock(() => {})
+mock.module('@codebuff/backend/util/logger', () => ({
+  logger: {
+    error: mockLoggerError,
+    debug: mock(() => {}),
+    info: mock(() => {}),
+    warn: mock(() => {}),
+  },
+}))
+
+mock.module('drizzle-orm', () => ({
+  eq: mock(() => 'eq-result'),
+}))
+
+// Now we can import the modules
+import db from '@codebuff/common/db'
+import * as schema from '@codebuff/common/db/schema'
 import { startAgentRun, finishAgentRun, addAgentStep } from '../agent-run'
 import { logger } from '../util/logger'
 
 describe('Agent Run Database Functions', () => {
   beforeEach(() => {
-    // Setup spies for database operations
-    spyOn(db, 'insert').mockReturnValue({
-      values: mock(() => Promise.resolve({ id: 'test-run-id' })),
-    } as any)
-    spyOn(db, 'update').mockReturnValue({
-      set: mock(() => ({
-        where: mock(() => Promise.resolve()),
-      })),
-    } as any)
-    // Mock logger
-    spyOn(logger, 'error').mockImplementation(() => {})
+    mockInsert.mockClear()
+    mockUpdate.mockClear()
+    mockLoggerError.mockClear()
+    // Restore any other spies if needed
+    mock.restore()
   })
 
   afterEach(() => {
     mock.restore()
   })
 
-  // Mock drizzle-orm module
-  beforeAll(async () => {
-    await mockModule('drizzle-orm', () => ({
-      eq: mock(() => 'eq-result'),
-    }))
-  })
-
-  afterAll(() => {
-    clearMockedModules()
-  })
-
   describe('startAgentRun', () => {
     it('should create a new agent run with generated ID when runId not provided', async () => {
       const mockValues = mock(() => Promise.resolve())
-      spyOn(db, 'insert').mockReturnValue({ values: mockValues } as any)
+      mockInsert.mockReturnValue({ values: mockValues } as any)
 
       // Mock crypto.randomUUID
       spyOn(crypto, 'randomUUID').mockReturnValue('generated-uuid')
@@ -77,7 +91,7 @@ describe('Agent Run Database Functions', () => {
 
     it('should use provided runId when specified', async () => {
       const mockValues = mock(() => Promise.resolve())
-      spyOn(db, 'insert').mockReturnValue({ values: mockValues } as any)
+      mockInsert.mockReturnValue({ values: mockValues } as any)
 
       const result = await startAgentRun({
         runId: 'custom-run-id',
@@ -99,7 +113,7 @@ describe('Agent Run Database Functions', () => {
 
     it('should handle missing userId gracefully', async () => {
       const mockValues = mock(() => Promise.resolve())
-      spyOn(db, 'insert').mockReturnValue({ values: mockValues } as any)
+      mockInsert.mockReturnValue({ values: mockValues } as any)
       spyOn(crypto, 'randomUUID').mockReturnValue('generated-uuid')
 
       await startAgentRun({
@@ -119,7 +133,7 @@ describe('Agent Run Database Functions', () => {
 
     it('should convert empty ancestorRunIds to null', async () => {
       const mockValues = mock(() => Promise.resolve())
-      spyOn(db, 'insert').mockReturnValue({ values: mockValues } as any)
+      mockInsert.mockReturnValue({ values: mockValues } as any)
       spyOn(crypto, 'randomUUID').mockReturnValue('generated-uuid')
 
       await startAgentRun({
@@ -136,7 +150,7 @@ describe('Agent Run Database Functions', () => {
 
     it('should preserve non-empty ancestorRunIds array', async () => {
       const mockValues = mock(() => Promise.resolve())
-      spyOn(db, 'insert').mockReturnValue({ values: mockValues } as any)
+      mockInsert.mockReturnValue({ values: mockValues } as any)
       spyOn(crypto, 'randomUUID').mockReturnValue('generated-uuid')
 
       await startAgentRun({
@@ -154,10 +168,10 @@ describe('Agent Run Database Functions', () => {
     it('should handle database errors and log them', async () => {
       const mockError = new Error('Database connection failed')
       const mockValues = mock(() => Promise.reject(mockError))
-      spyOn(db, 'insert').mockReturnValue({ values: mockValues } as any)
+      mockInsert.mockReturnValue({ values: mockValues } as any)
       spyOn(crypto, 'randomUUID').mockReturnValue('generated-uuid')
 
-      expect(
+      await expect(
         startAgentRun({
           agentId: 'test-agent',
           ancestorRunIds: [],
@@ -181,7 +195,7 @@ describe('Agent Run Database Functions', () => {
     it('should update agent run with completion data', async () => {
       const mockWhere = mock(() => Promise.resolve())
       const mockSet = mock(() => ({ where: mockWhere }))
-      spyOn(db, 'update').mockReturnValue({ set: mockSet } as any)
+      mockUpdate.mockReturnValue({ set: mockSet } as any)
 
       await finishAgentRun({
         userId: undefined,
@@ -207,7 +221,7 @@ describe('Agent Run Database Functions', () => {
     it('should handle failed status with error message', async () => {
       const mockWhere = mock(() => Promise.resolve())
       const mockSet = mock(() => ({ where: mockWhere }))
-      spyOn(db, 'update').mockReturnValue({ set: mockSet } as any)
+      mockUpdate.mockReturnValue({ set: mockSet } as any)
 
       await finishAgentRun({
         userId: undefined,
@@ -232,7 +246,7 @@ describe('Agent Run Database Functions', () => {
     it('should handle cancelled status', async () => {
       const mockSet = mock(() => ({ where: mock(() => Promise.resolve()) }))
       const mockWhere = mock(() => Promise.resolve())
-      spyOn(db, 'update').mockReturnValue({ set: mockSet } as any)
+      mockUpdate.mockReturnValue({ set: mockSet } as any)
       mockSet.mockReturnValue({ where: mockWhere })
 
       await finishAgentRun({
@@ -256,9 +270,9 @@ describe('Agent Run Database Functions', () => {
       const mockSet = mock(() => ({
         where: mock(() => Promise.reject(mockError)),
       }))
-      spyOn(db, 'update').mockReturnValue({ set: mockSet } as any)
+      mockUpdate.mockReturnValue({ set: mockSet } as any)
 
-      expect(
+      await expect(
         finishAgentRun({
           userId: undefined,
           runId: 'test-run-id',
@@ -283,7 +297,7 @@ describe('Agent Run Database Functions', () => {
   describe('addAgentStep', () => {
     it('should create a new agent step with all optional fields', async () => {
       const mockValues = mock(() => Promise.resolve())
-      spyOn(db, 'insert').mockReturnValue({ values: mockValues } as any)
+      mockInsert.mockReturnValue({ values: mockValues } as any)
       spyOn(crypto, 'randomUUID').mockReturnValue('step-uuid')
 
       const startTime = new Date('2023-01-01T10:00:00Z')
@@ -317,7 +331,7 @@ describe('Agent Run Database Functions', () => {
 
     it('should handle minimal required fields only', async () => {
       const mockValues = mock(() => Promise.resolve())
-      spyOn(db, 'insert').mockReturnValue({ values: mockValues } as any)
+      mockInsert.mockReturnValue({ values: mockValues } as any)
       spyOn(crypto, 'randomUUID').mockReturnValue('step-uuid')
 
       const startTime = new Date('2023-01-01T10:00:00Z')
@@ -346,7 +360,7 @@ describe('Agent Run Database Functions', () => {
 
     it('should handle skipped status with error message', async () => {
       const mockValues = mock(() => Promise.resolve())
-      spyOn(db, 'insert').mockReturnValue({ values: mockValues } as any)
+      mockInsert.mockReturnValue({ values: mockValues } as any)
       spyOn(crypto, 'randomUUID').mockReturnValue('step-uuid')
 
       const startTime = new Date('2023-01-01T10:00:00Z')
@@ -371,7 +385,7 @@ describe('Agent Run Database Functions', () => {
 
     it('should handle running status', async () => {
       const mockValues = mock(() => Promise.resolve())
-      spyOn(db, 'insert').mockReturnValue({ values: mockValues } as any)
+      mockInsert.mockReturnValue({ values: mockValues } as any)
       spyOn(crypto, 'randomUUID').mockReturnValue('step-uuid')
 
       const startTime = new Date('2023-01-01T10:00:00Z')
@@ -394,7 +408,7 @@ describe('Agent Run Database Functions', () => {
 
     it('should handle credits as number and convert to string', async () => {
       const mockValues = mock(() => Promise.resolve())
-      spyOn(db, 'insert').mockReturnValue({ values: mockValues } as any)
+      mockInsert.mockReturnValue({ values: mockValues } as any)
       spyOn(crypto, 'randomUUID').mockReturnValue('step-uuid')
 
       const startTime = new Date('2023-01-01T10:00:00Z')
@@ -418,12 +432,12 @@ describe('Agent Run Database Functions', () => {
     it('should handle database errors and log them', async () => {
       const mockError = new Error('Insert failed')
       const mockValues = mock(() => Promise.reject(mockError))
-      spyOn(db, 'insert').mockReturnValue({ values: mockValues } as any)
+      mockInsert.mockReturnValue({ values: mockValues } as any)
       spyOn(crypto, 'randomUUID').mockReturnValue('step-uuid')
 
       const startTime = new Date('2023-01-01T10:00:00Z')
 
-      expect(
+      await expect(
         addAgentStep({
           userId: undefined,
           agentRunId: 'run-123',
@@ -447,7 +461,7 @@ describe('Agent Run Database Functions', () => {
   describe('Data Type Conversions', () => {
     it('should properly convert numeric credits to strings for database storage', async () => {
       const mockValues = mock(() => Promise.resolve())
-      spyOn(db, 'insert').mockReturnValue({ values: mockValues } as any)
+      mockInsert.mockReturnValue({ values: mockValues } as any)
       spyOn(crypto, 'randomUUID').mockReturnValue('step-uuid')
 
       await addAgentStep({
@@ -468,7 +482,7 @@ describe('Agent Run Database Functions', () => {
 
     it('should handle timestamp conversion properly', async () => {
       const mockValues = mock(() => Promise.resolve())
-      spyOn(db, 'insert').mockReturnValue({ values: mockValues } as any)
+      mockInsert.mockReturnValue({ values: mockValues } as any)
       spyOn(crypto, 'randomUUID').mockReturnValue('step-uuid')
 
       const specificStartTime = new Date('2023-01-01T10:30:45.123Z')

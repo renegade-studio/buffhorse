@@ -63,6 +63,7 @@ export type CodebuffClientOptions = {
 export type RunOptions = {
   agent: string
   prompt: string
+  provider?: string
   params?: Record<string, any>
   previousRun?: RunState
   extraToolResults?: ToolResultPart[]
@@ -87,6 +88,7 @@ export async function run({
 
   agent,
   prompt,
+  provider,
   params,
   previousRun,
   extraToolResults,
@@ -192,6 +194,7 @@ export async function run({
   websocketHandler.sendInput({
     promptId,
     prompt,
+    provider,
     promptParams: params,
     fingerprintId: fingerprintId,
     costMode: 'normal',

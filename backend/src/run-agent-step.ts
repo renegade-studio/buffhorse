@@ -89,6 +89,7 @@ export interface AgentOptions {
 
   prompt: string | undefined
   params: Record<string, any> | undefined
+  provider?: string
 }
 
 export const runAgentStep = async (
@@ -111,6 +112,7 @@ export const runAgentStep = async (
     localAgentTemplates,
     prompt,
     params,
+    provider,
   } = options
   let agentState = options.agentState
 
@@ -454,6 +456,7 @@ export const loopAgentSteps = async (
     userId,
     clientSessionId,
     onResponseChunk,
+    provider,
     clearUserPromptMessagesAfterResponse = true,
   }: {
     userInputId: string
@@ -466,6 +469,7 @@ export const loopAgentSteps = async (
     fileContext: ProjectFileContext
     localAgentTemplates: Record<string, AgentTemplate>
     clearUserPromptMessagesAfterResponse?: boolean
+    provider?: string
 
     userId: string | undefined
     clientSessionId: string
@@ -628,6 +632,7 @@ export const loopAgentSteps = async (
         agentState: currentAgentState,
         prompt: currentPrompt,
         params: currentParams,
+        provider,
       })
 
       if (newAgentState.runId) {

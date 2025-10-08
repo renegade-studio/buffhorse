@@ -26,7 +26,7 @@ import typescriptQuery from './tree-sitter-queries/tree-sitter-typescript-tags.s
 export interface LanguageConfig {
   extensions: string[]
   wasmFile: string
-  queryPathOrContent: string
+  queryText: string
 
   /* Loaded lazily ↓ */
   parser?: Parser
@@ -62,52 +62,52 @@ export const languageTable: LanguageConfig[] = [
   {
     extensions: ['.ts'],
     wasmFile: WASM_FILES['tree-sitter-typescript.wasm'],
-    queryPathOrContent: typescriptQuery,
+    queryText: typescriptQuery,
   },
   {
     extensions: ['.tsx'],
     wasmFile: WASM_FILES['tree-sitter-tsx.wasm'],
-    queryPathOrContent: typescriptQuery,
+    queryText: typescriptQuery,
   },
   {
     extensions: ['.js', '.jsx'],
     wasmFile: WASM_FILES['tree-sitter-javascript.wasm'],
-    queryPathOrContent: javascriptQuery,
+    queryText: javascriptQuery,
   },
   {
     extensions: ['.py'],
     wasmFile: WASM_FILES['tree-sitter-python.wasm'],
-    queryPathOrContent: pythonQuery,
+    queryText: pythonQuery,
   },
   {
     extensions: ['.java'],
     wasmFile: WASM_FILES['tree-sitter-java.wasm'],
-    queryPathOrContent: javaQuery,
+    queryText: javaQuery,
   },
   {
     extensions: ['.cs'],
     wasmFile: WASM_FILES['tree-sitter-c-sharp.wasm'],
-    queryPathOrContent: csharpQuery,
+    queryText: csharpQuery,
   },
   {
     extensions: ['.cpp', '.hpp'],
     wasmFile: WASM_FILES['tree-sitter-cpp.wasm'],
-    queryPathOrContent: cppQuery,
+    queryText: cppQuery,
   },
   {
     extensions: ['.rs'],
     wasmFile: WASM_FILES['tree-sitter-rust.wasm'],
-    queryPathOrContent: rustQuery,
+    queryText: rustQuery,
   },
   {
     extensions: ['.rb'],
     wasmFile: WASM_FILES['tree-sitter-ruby.wasm'],
-    queryPathOrContent: rubyQuery,
+    queryText: rubyQuery,
   },
   {
     extensions: ['.go'],
     wasmFile: WASM_FILES['tree-sitter-go.wasm'],
-    queryPathOrContent: goQuery,
+    queryText: goQuery,
   },
 ]
 
@@ -271,9 +271,9 @@ export async function createLanguageConfig(
       parser.setLanguage(lang)
 
       // When loaded with bun, the queryText is a path to the file, not the content of the file.
-      const queryContent = path.isAbsolute(cfg.queryPathOrContent)
-        ? fs.readFileSync(cfg.queryPathOrContent, 'utf8')
-        : cfg.queryPathOrContent
+      const queryContent = path.isAbsolute(cfg.queryText)
+        ? fs.readFileSync(cfg.queryText, 'utf8')
+        : cfg.queryText
 
       cfg.language = lang
       cfg.parser = parser

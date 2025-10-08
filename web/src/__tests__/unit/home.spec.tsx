@@ -1,7 +1,9 @@
+/// <reference lib="dom" />
 import { render, screen } from '@testing-library/react'
+import { mock, fn } from 'bun:test'
 
 // Mock next-auth session to avoid requiring a SessionProvider
-jest.mock('next-auth/react', () => ({
+mock.module('next-auth/react', () => ({
   useSession: () => ({ data: null, status: 'unauthenticated' }),
 }))
 
@@ -10,15 +12,15 @@ import Home from '../../app/page'
 // Mock window.matchMedia
 Object.defineProperty(window, 'matchMedia', {
   writable: true,
-  value: jest.fn().mockImplementation((query) => ({
+  value: fn((query) => ({
     matches: false,
     media: query,
     onchange: null,
-    addListener: jest.fn(),
-    removeListener: jest.fn(),
-    addEventListener: jest.fn(),
-    removeEventListener: jest.fn(),
-    dispatchEvent: jest.fn(),
+    addListener: fn(),
+    removeListener: fn(),
+    addEventListener: fn(),
+    removeEventListener: fn(),
+    dispatchEvent: fn(),
   })),
 })
 
@@ -29,49 +31,49 @@ Object.defineProperty(window, 'innerWidth', {
 })
 
 // Mock next/navigation
-jest.mock('next/navigation', () => ({
+mock.module('next/navigation', () => ({
   useSearchParams: () => new URLSearchParams(),
 }))
 
 // Mock PostHog
-jest.mock('posthog-js', () => ({
-  capture: jest.fn(),
+mock.module('posthog-js', () => ({
+  capture: fn(),
 }))
 
 // Mock components used in Home page
-jest.mock('../../components/ui/hero', () => ({
+mock.module('../../components/ui/hero', () => ({
   Hero: () => <div data-testid="hero">Hero Component</div>,
 }))
 
-jest.mock('../../components/ui/landing/feature', () => ({
+mock.module('../../components/ui/landing/feature', () => ({
   FeatureSection: () => (
     <div data-testid="feature-section">Feature Section</div>
   ),
 }))
 
-jest.mock('../../components/ui/landing/competition', () => ({
+mock.module('../../components/ui/landing/competition', () => ({
   CompetitionSection: () => (
     <div data-testid="competition-section">Competition Section</div>
   ),
 }))
 
-jest.mock('../../components/ui/landing/testimonials-section', () => ({
+mock.module('../../components/ui/landing/testimonials-section', () => ({
   TestimonialsSection: () => (
     <div data-testid="testimonials-section">Testimonials Section</div>
   ),
 }))
 
-jest.mock('../../components/ui/landing/cta-section', () => ({
+mock.module('../../components/ui/landing/cta-section', () => ({
   CTASection: () => <div data-testid="cta-section">CTA Section</div>,
 }))
 
-jest.mock('../../components/IDEDemo', () => ({
+mock.module('../../components/IDEDemo', () => ({
   __esModule: true,
   default: () => <div data-testid="ide-demo">IDE Demo</div>,
 }))
 
 // Mock decorative blocks
-jest.mock('../../components/ui/decorative-blocks', () => ({
+mock.module('../../components/ui/decorative-blocks', () => ({
   DecorativeBlocks: ({ children }: { children: React.ReactNode }) => children,
   BlockColor: {
     CRTAmber: 'crt-amber',
@@ -80,7 +82,7 @@ jest.mock('../../components/ui/decorative-blocks', () => ({
 }))
 
 // Mock section component
-jest.mock('../../components/ui/section', () => ({
+mock.module('../../components/ui/section', () => ({
   Section: ({ children }: { children: React.ReactNode }) => (
     <div>{children}</div>
   ),

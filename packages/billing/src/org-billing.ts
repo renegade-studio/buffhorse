@@ -322,7 +322,10 @@ export async function grantOrganizationCredits(
     )
   } catch (error: any) {
     // Check if this is a unique constraint violation on operation_id
-    if (error.code === '23505' && error.constraint === 'credit_ledger_pkey') {
+    if (
+      error.code === '23505' &&
+      error.constraint_name === 'credit_ledger_pkey'
+    ) {
       logger.info(
         { organizationId, userId, operationId, amount },
         'Skipping duplicate organization credit grant due to idempotency check',
@@ -438,6 +441,12 @@ export function validateAndNormalizeRepositoryUrl(url: string): {
   try {
     // Basic URL validation
     const urlObj = new URL(url.startsWith('http') ? url : `https://${url}`)
+
+    // A simple check for a valid-looking hostname.
+    // This prevents "not-a-url" from being treated as a valid URL with a bad domain.
+    if (!urlObj.hostname.includes('.')) {
+      return { isValid: false, error: 'Invalid URL format' }
+    }
 
     // Whitelist allowed domains
     const allowedDomains = ['github.com', 'gitlab.com', 'bitbucket.org']

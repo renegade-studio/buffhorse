@@ -1,3 +1,4 @@
+import { anthropic } from '@ai-sdk/anthropic'
 import { google } from '@ai-sdk/google'
 import { openai } from '@ai-sdk/openai'
 import {
@@ -44,7 +45,20 @@ export type StreamChunk =
   | { type: 'error'; message: string }
 
 // TODO: We'll want to add all our models here!
-const modelToAiSDKModel = (model: Model): LanguageModel => {
+const modelToAiSDKModel = (
+  model: Model,
+  provider?: string,
+): LanguageModel => {
+  switch (provider) {
+    case 'anthropic':
+      return anthropic.languageModel(model)
+    case 'google':
+      return google.languageModel(model)
+    case 'openai':
+      return openai.languageModel(model)
+  }
+
+  // Fallback to existing logic for backward compatibility
   if (
     Object.values(finetunedVertexModels as Record<string, string>).includes(
       model,
@@ -82,6 +96,7 @@ export const promptAiSdkStream = async function* (
     maxRetries?: number
     onCostCalculated?: (credits: number) => Promise<void>
     includeCacheControl?: boolean
+    provider?: string
   } & Omit<Parameters<typeof streamText>[0], 'model' | 'messages'>,
 ): AsyncGenerator<StreamChunk, string | null> {
   if (
@@ -103,7 +118,7 @@ export const promptAiSdkStream = async function* (
   }
   const startTime = Date.now()
 
-  let aiSDKModel = modelToAiSDKModel(options.model)
+  let aiSDKModel = modelToAiSDKModel(options.model, options.provider)
 
   const response = streamText({
     ...options,
@@ -270,6 +285,7 @@ export const promptAiSdk = async function (
     agentId?: string
     onCostCalculated?: (credits: number) => Promise<void>
     includeCacheControl?: boolean
+    provider?: string
   } & Omit<Parameters<typeof generateText>[0], 'model' | 'messages'>,
 ): Promise<string> {
   if (
@@ -291,7 +307,7 @@ export const promptAiSdk = async function (
   }
 
   const startTime = Date.now()
-  let aiSDKModel = modelToAiSDKModel(options.model)
+  let aiSDKModel = modelToAiSDKModel(options.model, options.provider)
 
   const response = await generateText({
     ...options,
@@ -344,6 +360,7 @@ export const promptAiSdkStructured = async function <T>(options: {
   agentId?: string
   onCostCalculated?: (credits: number) => Promise<void>
   includeCacheControl?: boolean
+  provider?: string
 }): Promise<T> {
   if (
     !checkLiveUserInput(
@@ -363,7 +380,7 @@ export const promptAiSdkStructured = async function <T>(options: {
     return {} as T
   }
   const startTime = Date.now()
-  let aiSDKModel = modelToAiSDKModel(options.model)
+  let aiSDKModel = modelToAiSDKModel(options.model, options.provider)
 
   const responsePromise = generateObject<z.ZodType<T>, 'object'>({
     ...options,

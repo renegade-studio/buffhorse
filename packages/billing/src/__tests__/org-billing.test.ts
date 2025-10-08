@@ -2,7 +2,7 @@ import {
   clearMockedModules,
   mockModule,
 } from '@codebuff/common/testing/mock-modules'
-import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'bun:test'
 
 import {
   calculateOrganizationUsageAndBalance,
@@ -83,6 +83,29 @@ describe('Organization Billing', () => {
 
   afterAll(() => {
     clearMockedModules()
+  })
+
+  beforeEach(() => {
+    // Reset the mock to a default working state before each test
+    mockModule('@codebuff/common/db', () => ({
+      default: {
+        select: () => ({
+          from: () => ({
+            where: () => ({
+              orderBy: () => mockGrants,
+            }),
+          }),
+        }),
+        insert: () => ({
+          values: () => Promise.resolve(),
+        }),
+        update: () => ({
+          set: () => ({
+            where: () => Promise.resolve(),
+          }),
+        }),
+      },
+    }))
   })
 
   describe('calculateOrganizationUsageAndBalance', () => {
@@ -249,7 +272,7 @@ describe('Organization Billing', () => {
             values: () => {
               const error = new Error('Duplicate key')
               ;(error as any).code = '23505'
-              ;(error as any).constraint = 'credit_ledger_pkey'
+              ;(error as any).constraint_name = 'credit_ledger_pkey'
               throw error
             },
           }),

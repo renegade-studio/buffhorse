@@ -47,6 +47,7 @@ export const mainPrompt = async (
     promptId,
     agentId,
     promptParams,
+    provider,
   } = action
   const { fileContext, mainAgentState } = sessionState
 
@@ -203,6 +204,7 @@ export const mainPrompt = async (
     clientSessionId,
     onResponseChunk,
     localAgentTemplates,
+    provider,
   })
 
   logger.debug({ agentState }, 'Main prompt finished')

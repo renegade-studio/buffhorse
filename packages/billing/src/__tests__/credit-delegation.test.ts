@@ -28,11 +28,31 @@ describe('Credit Delegation', () => {
       default: {
         select: mock(() => ({
           from: mock(() => ({
-            innerJoin: mock(() => ({
-              where: mock(() =>
-                Promise.resolve([{ orgId: 'org-123', orgName: 'CodebuffAI' }]),
-              ),
-            })),
+            innerJoin: mock(
+              () => ({
+                // For findOrganizationForRepository -> userOrganizations
+                where: mock(() =>
+                  Promise.resolve([
+                    {
+                      orgId: 'org-123',
+                      orgName: 'CodebuffAI',
+                      orgSlug: 'codebuffai',
+                    },
+                  ]),
+                ),
+              }),
+            ),
+            where: mock(
+              () =>
+                // For findOrganizationForRepository -> orgRepos
+                Promise.resolve([
+                  {
+                    repoUrl: 'https://github.com/codebuffai/codebuff',
+                    repoName: 'codebuff',
+                    isActive: true,
+                  },
+                ]),
+            ),
           })),
         })),
       },
@@ -40,10 +60,11 @@ describe('Credit Delegation', () => {
 
     mockModule('@codebuff/common/db/schema', () => ({
       orgMember: { org_id: 'org_id', user_id: 'user_id' },
-      org: { id: 'id', name: 'name' },
+      org: { id: 'id', name: 'name', slug: 'slug' },
       orgRepo: {
         org_id: 'org_id',
         repo_url: 'repo_url',
+        repo_name: 'repo_name',
         is_active: 'is_active',
       },
     }))
