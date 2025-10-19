@@ -52,15 +52,15 @@ export const cliOptions: CliParam[] = [
   {
     flags: '--model <model>',
     description:
-      'Experimental: Specify the main model to use for the agent ("sonnet-3.6", "sonnet-3.7", "gpt-4.1", "gemini-2.5-pro", "o4-mini", "o3"). Be aware codebuff might not work as well with non-default models.',
-    menuDescription: 'Specify main LLM (e.g., "sonnet-3.7") (Experimental)',
-    hidden: true,
+      'Specify the main model to use for the agent. Defaults to "gemma3n".',
+    menuDescription: 'Specify main LLM (e.g., "gemma3n")',
+    hidden: false,
   },
   {
     flags: '--provider <provider>',
     description:
-      'Specify the AI provider to use (e.g., "anthropic", "google", "openai"). Defaults to OpenRouter.',
-    menuDescription: 'Specify the AI provider (e.g., "anthropic")',
+      'Specify the AI provider. Options: "anthropic", "google", "openai", "vllm", "ollama", "lmstudio", "ollm". Defaults to OpenRouter.',
+    menuDescription: 'Specify the AI provider (e.g., "ollama")',
     hidden: false,
   },
   {

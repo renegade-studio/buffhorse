@@ -6,6 +6,7 @@ import {
   geminiModels,
   openaiModels,
 } from '@codebuff/common/old-constants'
+import { env } from '@codebuff/internal'
 import { buildArray } from '@codebuff/common/util/array'
 import { convertCbToModelMessages } from '@codebuff/common/util/messages'
 import { errorToObject } from '@codebuff/common/util/object'
@@ -56,6 +57,14 @@ const modelToAiSDKModel = (
       return google.languageModel(model)
     case 'openai':
       return openai.languageModel(model)
+    case 'vllm':
+      return openai.languageModel(model, { baseURL: env.VLLM_BASE_URL })
+    case 'ollama':
+      return openai.languageModel(model, { baseURL: env.OLLAMA_BASE_URL })
+    case 'lmstudio':
+      return openai.languageModel(model, { baseURL: env.LMSTUDIO_BASE_URL })
+    case 'ollm':
+      return openai.languageModel(model, { baseURL: env.OLLM_API_URL })
   }
 
   // Fallback to existing logic for backward compatibility

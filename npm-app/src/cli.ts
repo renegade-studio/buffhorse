@@ -279,7 +279,7 @@ export class CLI {
       reconnectWhenNextIdle: this.reconnectWhenNextIdle.bind(this),
       costMode: this.costMode,
       git: this.git,
-      model,
+      model: model || 'gemma3n',
       provider,
     })
 

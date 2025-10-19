@@ -10,6 +10,10 @@ const envSchema = {
   server: {
     // Backend variables
     CODEBUFF_API_KEY: z.string().optional(),
+    OLLAMA_BASE_URL: z.string().url().optional(),
+    VLLM_BASE_URL: z.string().url().optional(),
+    LMSTUDIO_BASE_URL: z.string().url().optional(),
+    OLLM_API_URL: z.string().url().optional(),
     OPEN_ROUTER_API_KEY: z.string().min(1),
     RELACE_API_KEY: z.string().min(1),
     LINKUP_API_KEY: z.string().min(1),
@@ -51,6 +55,10 @@ const envSchema = {
   runtimeEnv: {
     // Backend variables
     CODEBUFF_API_KEY: process.env.CODEBUFF_API_KEY,
+    OLLAMA_BASE_URL: process.env.OLLAMA_BASE_URL,
+    VLLM_BASE_URL: process.env.VLLM_BASE_URL,
+    LMSTUDIO_BASE_URL: process.env.LMSTUDIO_BASE_URL,
+    OLLM_API_URL: process.env.OLLM_API_URL,
     OPEN_ROUTER_API_KEY: process.env.OPEN_ROUTER_API_KEY,
     RELACE_API_KEY: process.env.RELACE_API_KEY,
     LINKUP_API_KEY: process.env.LINKUP_API_KEY,
