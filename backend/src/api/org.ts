@@ -4,7 +4,7 @@ import { z } from 'zod/v4'
 
 import { extractAuthTokenFromHeader } from '../util/auth-helpers'
 import { logger } from '../util/logger'
-import { getUserIdFromAuthToken } from '../websockets/websocket-action'
+import { getUserInfoFromApiKey } from '../websockets/auth'
 
 import type {
   Request as ExpressRequest,
@@ -35,14 +35,20 @@ async function isRepoCoveredHandler(
         .status(401)
         .json({ error: 'Missing x-codebuff-api-key header' })
     }
-    const userId = await getUserIdFromAuthToken({ authToken })
+    const userId = (
+      await getUserInfoFromApiKey({ apiKey: authToken, fields: ['id'] })
+    )?.id
 
     if (!userId) {
       return res.status(401).json({ error: INVALID_AUTH_TOKEN_MESSAGE })
     }
 
     // Check if repository is covered by an organization
-    const orgLookup = await findOrganizationForRepository(userId, remoteUrl)
+    const orgLookup = await findOrganizationForRepository({
+      userId,
+      repositoryUrl: remoteUrl,
+      logger,
+    })
 
     return res.status(200).json({
       isCovered: orgLookup.found,

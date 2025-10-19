@@ -1,3 +1,4 @@
+import { promptAiSdk } from '@codebuff/backend/llm-apis/vercel-ai-sdk/ai-sdk'
 import { getTracesAndAllDataForUser, setupBigQuery } from '@codebuff/bigquery'
 import { models } from '@codebuff/common/old-constants'
 
@@ -95,6 +96,9 @@ async function runTraces() {
                 fileBlobs,
                 model: MODEL_TO_TEST,
                 dataset: DATASET,
+                promptAiSdk,
+                sendAction: () => {},
+                logger: console,
               })
               console.log(`Successfully stored relabel for trace ${trace.id}`)
             } catch (error) {

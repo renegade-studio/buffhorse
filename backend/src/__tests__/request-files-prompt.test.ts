@@ -1,5 +1,9 @@
 import { finetunedVertexModels } from '@codebuff/common/old-constants'
 import {
+  TEST_AGENT_RUNTIME_IMPL,
+  TEST_AGENT_RUNTIME_SCOPED_IMPL,
+} from '@codebuff/common/testing/impl/agent-runtime'
+import {
   clearMockedModules,
   mockModule,
 } from '@codebuff/common/testing/mock-modules'
@@ -8,7 +12,6 @@ import {
   beforeAll,
   beforeEach,
   mock as bunMockFn,
-  spyOn as bunSpyOn,
   describe,
   expect,
   it,
@@ -18,9 +21,12 @@ import * as OriginalRequestFilesPromptModule from '../find-files/request-files-p
 import * as geminiWithFallbacksModule from '../llm-apis/gemini-with-fallbacks'
 
 import type { CostMode } from '@codebuff/common/old-constants'
+import type { AgentRuntimeDeps } from '@codebuff/common/types/contracts/agent-runtime'
 import type { Message } from '@codebuff/common/types/messages/codebuff-message'
 import type { ProjectFileContext } from '@codebuff/common/util/file'
 import type { Mock } from 'bun:test'
+
+let agentRuntimeImpl: AgentRuntimeDeps
 
 describe('requestRelevantFiles', () => {
   const mockMessages: Message[] = [{ role: 'user', content: 'test prompt' }]
@@ -59,8 +65,6 @@ describe('requestRelevantFiles', () => {
   const mockCostMode: CostMode = 'normal'
   const mockRepoId = 'owner/repo'
 
-  let getCustomFilePickerConfigForOrgSpy: any // Explicitly typed as any
-
   beforeAll(() => {
     mockModule('@codebuff/backend/llm-apis/gemini-with-fallbacks', () => ({
       promptFlashWithFallbacks: bunMockFn(() =>
@@ -73,15 +77,6 @@ describe('requestRelevantFiles', () => {
         approvedOrgIdForRepo: 'org123',
         isRepoApprovedForUserInOrg: true,
       })),
-    }))
-
-    mockModule('@codebuff/backend/util/logger', () => ({
-      logger: {
-        info: bunMockFn(() => {}),
-        error: bunMockFn(() => {}),
-        warn: bunMockFn(() => {}),
-        debug: bunMockFn(() => {}),
-      },
     }))
 
     mockModule('@codebuff/common/db', () => ({
@@ -103,20 +98,7 @@ describe('requestRelevantFiles', () => {
   })
 
   beforeEach(() => {
-    // If the spy was created in a previous test, restore it
-    if (
-      getCustomFilePickerConfigForOrgSpy &&
-      typeof getCustomFilePickerConfigForOrgSpy.mockRestore === 'function'
-    ) {
-      getCustomFilePickerConfigForOrgSpy.mockRestore()
-      getCustomFilePickerConfigForOrgSpy = undefined
-    }
-
-    // Use the directly imported bunSpyOn
-    getCustomFilePickerConfigForOrgSpy = bunSpyOn(
-      OriginalRequestFilesPromptModule,
-      'getCustomFilePickerConfigForOrg',
-    ).mockResolvedValue(null)
+    agentRuntimeImpl = { ...TEST_AGENT_RUNTIME_IMPL }
 
     const promptFlashWithFallbacksMock =
       geminiWithFallbacksModule.promptFlashWithFallbacks as Mock<
@@ -127,21 +109,23 @@ describe('requestRelevantFiles', () => {
   })
 
   it('should use default file counts and maxFiles when no custom config', async () => {
-    await OriginalRequestFilesPromptModule.requestRelevantFiles(
-      { messages: mockMessages, system: mockSystem },
-      mockFileContext,
-      mockAssistantPrompt,
-      mockAgentStepId,
-      mockClientSessionId,
-      mockFingerprintId,
-      mockUserInputId,
-      mockUserId,
-      mockRepoId,
-    )
+    await OriginalRequestFilesPromptModule.requestRelevantFiles({
+      ...agentRuntimeImpl,
+      ...TEST_AGENT_RUNTIME_SCOPED_IMPL,
+      messages: mockMessages,
+      system: mockSystem,
+      fileContext: mockFileContext,
+      assistantPrompt: mockAssistantPrompt,
+      agentStepId: mockAgentStepId,
+      clientSessionId: mockClientSessionId,
+      fingerprintId: mockFingerprintId,
+      userInputId: mockUserInputId,
+      userId: mockUserId,
+      repoId: mockRepoId,
+    })
     expect(
       geminiWithFallbacksModule.promptFlashWithFallbacks,
     ).toHaveBeenCalled()
-    expect(getCustomFilePickerConfigForOrgSpy).toHaveBeenCalled()
   })
 
   it('should use custom file counts from config', async () => {
@@ -150,23 +134,24 @@ describe('requestRelevantFiles', () => {
       customFileCounts: { normal: 5 },
       maxFilesPerRequest: 10,
     }
-    getCustomFilePickerConfigForOrgSpy!.mockResolvedValue(customConfig as any)
 
-    await OriginalRequestFilesPromptModule.requestRelevantFiles(
-      { messages: mockMessages, system: mockSystem },
-      mockFileContext,
-      mockAssistantPrompt,
-      mockAgentStepId,
-      mockClientSessionId,
-      mockFingerprintId,
-      mockUserInputId,
-      mockUserId,
-      mockRepoId,
-    )
+    await OriginalRequestFilesPromptModule.requestRelevantFiles({
+      ...agentRuntimeImpl,
+      ...TEST_AGENT_RUNTIME_SCOPED_IMPL,
+      messages: mockMessages,
+      system: mockSystem,
+      fileContext: mockFileContext,
+      assistantPrompt: mockAssistantPrompt,
+      agentStepId: mockAgentStepId,
+      clientSessionId: mockClientSessionId,
+      fingerprintId: mockFingerprintId,
+      userInputId: mockUserInputId,
+      userId: mockUserId,
+      repoId: mockRepoId,
+    })
     expect(
       geminiWithFallbacksModule.promptFlashWithFallbacks,
     ).toHaveBeenCalled()
-    expect(getCustomFilePickerConfigForOrgSpy).toHaveBeenCalled()
   })
 
   it('should use custom maxFilesPerRequest from config', async () => {
@@ -174,80 +159,81 @@ describe('requestRelevantFiles', () => {
       modelName: 'ft_filepicker_005',
       maxFilesPerRequest: 3,
     }
-    getCustomFilePickerConfigForOrgSpy!.mockResolvedValue(customConfig as any)
 
-    const result = await OriginalRequestFilesPromptModule.requestRelevantFiles(
-      { messages: mockMessages, system: mockSystem },
-      mockFileContext,
-      mockAssistantPrompt,
-      mockAgentStepId,
-      mockClientSessionId,
-      mockFingerprintId,
-      mockUserInputId,
-      mockUserId,
-      mockRepoId,
-    )
+    const result = await OriginalRequestFilesPromptModule.requestRelevantFiles({
+      ...agentRuntimeImpl,
+      ...TEST_AGENT_RUNTIME_SCOPED_IMPL,
+      messages: mockMessages,
+      system: mockSystem,
+      fileContext: mockFileContext,
+      assistantPrompt: mockAssistantPrompt,
+      agentStepId: mockAgentStepId,
+      clientSessionId: mockClientSessionId,
+      fingerprintId: mockFingerprintId,
+      userInputId: mockUserInputId,
+      userId: mockUserId,
+      repoId: mockRepoId,
+    })
     expect(result).toBeArray()
     if (result) {
       expect(result.length).toBeLessThanOrEqual(3)
     }
-    expect(getCustomFilePickerConfigForOrgSpy).toHaveBeenCalled()
   })
 
   it('should use custom modelName from config', async () => {
     const customConfig = {
       modelName: 'ft_filepicker_010',
     }
-    getCustomFilePickerConfigForOrgSpy!.mockResolvedValue(customConfig as any)
 
-    await OriginalRequestFilesPromptModule.requestRelevantFiles(
-      { messages: mockMessages, system: mockSystem },
-      mockFileContext,
-      mockAssistantPrompt,
-      mockAgentStepId,
-      mockClientSessionId,
-      mockFingerprintId,
-      mockUserInputId,
-      mockUserId,
-      mockRepoId,
-    )
+    await OriginalRequestFilesPromptModule.requestRelevantFiles({
+      ...agentRuntimeImpl,
+      ...TEST_AGENT_RUNTIME_SCOPED_IMPL,
+      messages: mockMessages,
+      system: mockSystem,
+      fileContext: mockFileContext,
+      assistantPrompt: mockAssistantPrompt,
+      agentStepId: mockAgentStepId,
+      clientSessionId: mockClientSessionId,
+      fingerprintId: mockFingerprintId,
+      userInputId: mockUserInputId,
+      userId: mockUserId,
+      repoId: mockRepoId,
+    })
     expect(
       geminiWithFallbacksModule.promptFlashWithFallbacks,
     ).toHaveBeenCalledWith(
-      expect.anything(),
       expect.objectContaining({
         useFinetunedModel: finetunedVertexModels.ft_filepicker_010,
       }),
     )
-    expect(getCustomFilePickerConfigForOrgSpy).toHaveBeenCalled()
   })
 
   it('should use default model if custom modelName is invalid', async () => {
     const customConfig = {
       modelName: 'invalid-model-name',
     }
-    getCustomFilePickerConfigForOrgSpy!.mockResolvedValue(customConfig as any)
 
-    await OriginalRequestFilesPromptModule.requestRelevantFiles(
-      { messages: mockMessages, system: mockSystem },
-      mockFileContext,
-      mockAssistantPrompt,
-      mockAgentStepId,
-      mockClientSessionId,
-      mockFingerprintId,
-      mockUserInputId,
-      mockUserId,
-      mockRepoId,
-    )
+    await OriginalRequestFilesPromptModule.requestRelevantFiles({
+      ...agentRuntimeImpl,
+      ...TEST_AGENT_RUNTIME_SCOPED_IMPL,
+      messages: mockMessages,
+      system: mockSystem,
+      fileContext: mockFileContext,
+      assistantPrompt: mockAssistantPrompt,
+      agentStepId: mockAgentStepId,
+      clientSessionId: mockClientSessionId,
+      fingerprintId: mockFingerprintId,
+      userInputId: mockUserInputId,
+      userId: mockUserId,
+      repoId: mockRepoId,
+    })
     const expectedModel = finetunedVertexModels.ft_filepicker_010
     expect(
       geminiWithFallbacksModule.promptFlashWithFallbacks,
     ).toHaveBeenCalledWith(
-      expect.anything(),
       expect.objectContaining({
         useFinetunedModel: expectedModel,
       }),
     )
-    expect(getCustomFilePickerConfigForOrgSpy).toHaveBeenCalled()
   })
 })

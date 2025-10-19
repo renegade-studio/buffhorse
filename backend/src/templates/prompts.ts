@@ -1,15 +1,23 @@
+import { getAgentTemplate } from '@codebuff/agent-runtime/templates/agent-registry'
+import { buildArray } from '@codebuff/common/util/array'
 import { schemaToJsonStr } from '@codebuff/common/util/zod-schema'
 
-import { getAgentTemplate } from './agent-registry'
-
 import type { AgentTemplate } from '@codebuff/common/types/agent-template'
+import type { Logger } from '@codebuff/common/types/contracts/logger'
+import type { ParamsExcluding } from '@codebuff/common/types/function-params'
 import type { AgentTemplateType } from '@codebuff/common/types/session-state'
-import { buildArray } from '@codebuff/common/util/array'
 
 export async function buildSpawnableAgentsDescription(
-  spawnableAgents: AgentTemplateType[],
-  agentTemplates: Record<string, AgentTemplate>,
+  params: {
+    spawnableAgents: AgentTemplateType[]
+    agentTemplates: Record<string, AgentTemplate>
+    logger: Logger
+  } & ParamsExcluding<
+    typeof getAgentTemplate,
+    'agentId' | 'localAgentTemplates'
+  >,
 ): Promise<string> {
+  const { spawnableAgents, agentTemplates, logger } = params
   if (spawnableAgents.length === 0) {
     return ''
   }
@@ -18,7 +26,11 @@ export async function buildSpawnableAgentsDescription(
     spawnableAgents.map(async (agentType) => {
       return [
         agentType,
-        await getAgentTemplate(agentType, agentTemplates),
+        await getAgentTemplate({
+          ...params,
+          agentId: agentType,
+          localAgentTemplates: agentTemplates,
+        }),
       ] as const
     }),
   )

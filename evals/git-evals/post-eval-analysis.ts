@@ -1,5 +1,5 @@
+import { countTokens } from '@codebuff/agent-runtime/util/token-counter'
 import { promptAiSdkStructured } from '@codebuff/backend/llm-apis/vercel-ai-sdk/ai-sdk'
-import { countTokens } from '@codebuff/backend/util/token-counter'
 import { models } from '@codebuff/common/old-constants'
 import { generateCompactId } from '@codebuff/common/util/string'
 import { z } from 'zod/v4'
@@ -188,5 +188,7 @@ export async function analyzeEvalResults(
     userInputId: generateCompactId(),
     userId: undefined,
     timeout: 10 * 60 * 1000, // 10 minute timeout
+    sendAction: () => {},
+    logger: console,
   })
 }

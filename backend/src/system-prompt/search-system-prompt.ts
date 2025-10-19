@@ -1,3 +1,7 @@
+import {
+  countTokens,
+  countTokensJson,
+} from '@codebuff/agent-runtime/util/token-counter'
 import { insertTrace } from '@codebuff/bigquery'
 import { buildArray } from '@codebuff/common/util/array'
 
@@ -6,14 +10,14 @@ import {
   getProjectFileTreePrompt,
   getSystemInfoPrompt,
 } from './prompts'
-import { logger } from '../util/logger'
-import { countTokens, countTokensJson } from '../util/token-counter'
 
+import type { Logger } from '@codebuff/common/types/contracts/logger'
 import type { ProjectFileContext } from '@codebuff/common/util/file'
 
 export function getSearchSystemPrompt(params: {
   fileContext: ProjectFileContext
   messagesTokens: number
+  logger: Logger
   options: {
     agentStepId: string
     clientSessionId: string
@@ -22,7 +26,7 @@ export function getSearchSystemPrompt(params: {
     userId: string | undefined
   }
 }): string {
-  const { fileContext, messagesTokens, options } = params
+  const { fileContext, messagesTokens, logger, options } = params
   const startTime = Date.now()
 
   const maxTokens = 500_000 // costMode === 'lite' ? 64_000 :
@@ -41,17 +45,23 @@ export function getSearchSystemPrompt(params: {
         20_000,
     ) * 20_000
 
-  const projectFileTreePrompt = getProjectFileTreePrompt(
+  const projectFileTreePrompt = getProjectFileTreePrompt({
     fileContext,
     fileTreeTokenBudget,
-    'search',
-  )
+    mode: 'search',
+    logger,
+  })
 
   const t = Date.now()
   const truncationBudgets = [5_000, 20_000, 40_000, 100_000, 500_000]
   const truncatedTrees = truncationBudgets.reduce(
     (acc, budget) => {
-      acc[budget] = getProjectFileTreePrompt(fileContext, budget, 'search')
+      acc[budget] = getProjectFileTreePrompt({
+        fileContext,
+        fileTreeTokenBudget: budget,
+        mode: 'search',
+        logger,
+      })
       return acc
     },
     {} as Record<number, string>,

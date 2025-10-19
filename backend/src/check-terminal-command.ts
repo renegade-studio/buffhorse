@@ -1,23 +1,22 @@
 import { models } from '@codebuff/common/old-constants'
 import { withTimeout } from '@codebuff/common/util/promise'
 
-import { promptAiSdk } from './llm-apis/vercel-ai-sdk/ai-sdk'
-import { logger } from './util/logger'
+import type { PromptAiSdkFn } from '@codebuff/common/types/contracts/llm'
+import type { Logger } from '@codebuff/common/types/contracts/logger'
+import type { ParamsExcluding } from '@codebuff/common/types/function-params'
 
 /**
  * Checks if a prompt appears to be a terminal command that can be run directly.
  * Returns the command if it is a terminal command, null otherwise.
  */
-export async function checkTerminalCommand(params: {
-  prompt: string
-  options: {
-    clientSessionId: string
-    fingerprintId: string
-    userInputId: string
-    userId: string | undefined
-  }
-}): Promise<string | null> {
-  const { prompt, options } = params
+export async function checkTerminalCommand(
+  params: {
+    prompt: string
+    promptAiSdk: PromptAiSdkFn
+    logger: Logger
+  } & ParamsExcluding<PromptAiSdkFn, 'messages' | 'model'>,
+): Promise<string | null> {
+  const { prompt, promptAiSdk, logger } = params
   if (!prompt?.trim()) {
     return null
   }
@@ -61,9 +60,9 @@ ${JSON.stringify(prompt)}`,
     // Race between OpenAI and Gemini with timeouts
     const response = await withTimeout(
       promptAiSdk({
+        ...params,
         messages,
         model: models.openrouter_gpt4_1_nano,
-        ...options,
       }).then((response) => response.toLowerCase().includes('y')),
       30000,
       'OpenAI API request timed out',

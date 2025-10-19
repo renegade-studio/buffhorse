@@ -1,9 +1,14 @@
 // Set environment variables before any imports
 process.env.LINKUP_API_KEY = 'test-api-key'
 
+import { assembleLocalAgentTemplates } from '@codebuff/agent-runtime/templates/agent-registry'
 import * as bigquery from '@codebuff/bigquery'
 import * as analytics from '@codebuff/common/analytics'
 import { TEST_USER_ID } from '@codebuff/common/old-constants'
+import {
+  TEST_AGENT_RUNTIME_IMPL,
+  TEST_AGENT_RUNTIME_SCOPED_IMPL,
+} from '@codebuff/common/testing/impl/agent-runtime'
 import { getToolCallString } from '@codebuff/common/tools/utils'
 import { getInitialSessionState } from '@codebuff/common/types/session-state'
 import {
@@ -16,22 +21,22 @@ import {
   test,
 } from 'bun:test'
 
-import researcherAgent from '../../../.agents/researcher'
+import researcherAgent from '../../../.agents/researcher/researcher'
 import * as checkTerminalCommandModule from '../check-terminal-command'
 import * as requestFilesPrompt from '../find-files/request-files-prompt'
 import * as liveUserInputs from '../live-user-inputs'
-import { MockWebSocket, mockFileContext } from './test-utils'
+import { mockFileContext } from './test-utils'
 import * as linkupApi from '../llm-apis/linkup-api'
-import * as aisdk from '../llm-apis/vercel-ai-sdk/ai-sdk'
 import { runAgentStep } from '../run-agent-step'
-import { assembleLocalAgentTemplates } from '../templates/agent-registry'
-import * as websocketAction from '../websockets/websocket-action'
 
-import type { Logger } from '@codebuff/types/logger'
-import type { WebSocket } from 'ws'
+import type {
+  AgentRuntimeDeps,
+  AgentRuntimeScopedDeps,
+} from '@codebuff/common/types/contracts/agent-runtime'
 
+let agentRuntimeImpl: AgentRuntimeDeps = { ...TEST_AGENT_RUNTIME_IMPL }
 function mockAgentStream(content: string | string[]) {
-  spyOn(aisdk, 'promptAiSdkStream').mockImplementation(async function* ({}) {
+  agentRuntimeImpl.promptAiSdkStream = async function* ({}) {
     if (typeof content === 'string') {
       content = [content]
     }
@@ -39,42 +44,39 @@ function mockAgentStream(content: string | string[]) {
       yield { type: 'text' as const, text: chunk }
     }
     return 'mock-message-id'
-  })
+  }
 }
 
-describe('web_search tool with researcher agent', () => {
-  const logger: Logger = {
-    debug: () => {},
-    error: () => {},
-    info: () => {},
-    warn: () => {},
-  }
+let agentRuntimeScopedImpl: AgentRuntimeScopedDeps
 
+describe('web_search tool with researcher agent', () => {
   beforeEach(() => {
+    agentRuntimeScopedImpl = { ...TEST_AGENT_RUNTIME_SCOPED_IMPL }
+
     // Mock analytics and tracing
     spyOn(analytics, 'initAnalytics').mockImplementation(() => {})
-    analytics.initAnalytics({ logger })
+    analytics.initAnalytics(agentRuntimeImpl)
     spyOn(analytics, 'trackEvent').mockImplementation(() => {})
     spyOn(bigquery, 'insertTrace').mockImplementation(() =>
       Promise.resolve(true),
     )
 
     // Mock websocket actions
-    spyOn(websocketAction, 'requestFiles').mockImplementation(async () => ({}))
-    spyOn(websocketAction, 'requestFile').mockImplementation(async () => null)
-    spyOn(websocketAction, 'requestToolCall').mockImplementation(async () => ({
+    agentRuntimeScopedImpl.requestFiles = async () => ({})
+    agentRuntimeScopedImpl.requestOptionalFile = async () => null
+    agentRuntimeScopedImpl.requestToolCall = async () => ({
       output: [
         {
           type: 'json',
           value: 'Tool call success',
         },
       ],
-    }))
+    })
 
     // Mock LLM APIs
-    spyOn(aisdk, 'promptAiSdk').mockImplementation(() =>
-      Promise.resolve('Test response'),
-    )
+    agentRuntimeImpl.promptAiSdk = async function () {
+      return 'Test response'
+    }
 
     // Mock other required modules
     spyOn(requestFilesPrompt, 'requestRelevantFiles').mockImplementation(
@@ -91,6 +93,7 @@ describe('web_search tool with researcher agent', () => {
 
   afterEach(() => {
     mock.restore()
+    agentRuntimeImpl = { ...TEST_AGENT_RUNTIME_IMPL }
   })
 
   // MockWebSocket and mockFileContext imported from test-utils
@@ -120,11 +123,14 @@ describe('web_search tool with researcher agent', () => {
       ...sessionState.mainAgentState,
       agentType: 'researcher' as const,
     }
-    const { agentTemplates } = assembleLocalAgentTemplates(
-      mockFileContextWithAgents,
-    )
+    const { agentTemplates } = assembleLocalAgentTemplates({
+      ...agentRuntimeImpl,
+      fileContext: mockFileContextWithAgents,
+    })
 
-    await runAgentStep(new MockWebSocket() as unknown as WebSocket, {
+    await runAgentStep({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
       system: 'Test system prompt',
       userId: TEST_USER_ID,
       userInputId: 'test-input',
@@ -136,12 +142,14 @@ describe('web_search tool with researcher agent', () => {
       localAgentTemplates: agentTemplates,
       agentState,
       prompt: 'Search for test',
-      params: undefined,
+      spawnParams: undefined,
     })
 
     // Just verify that searchWeb was called
-    expect(linkupApi.searchWeb).toHaveBeenCalledWith('test query', {
+    expect(linkupApi.searchWeb).toHaveBeenCalledWith({
+      query: 'test query',
       depth: 'standard',
+      logger: expect.anything(),
     })
   })
 
@@ -165,34 +173,33 @@ describe('web_search tool with researcher agent', () => {
       ...sessionState.mainAgentState,
       agentType: 'researcher' as const,
     }
-    const { agentTemplates } = assembleLocalAgentTemplates(
-      mockFileContextWithAgents,
-    )
+    const { agentTemplates } = assembleLocalAgentTemplates({
+      ...agentRuntimeImpl,
+      fileContext: mockFileContextWithAgents,
+    })
 
-    const { agentState: newAgentState } = await runAgentStep(
-      new MockWebSocket() as unknown as WebSocket,
-      {
-        system: 'Test system prompt',
-        userId: TEST_USER_ID,
-        userInputId: 'test-input',
-        clientSessionId: 'test-session',
-        fingerprintId: 'test-fingerprint',
-        onResponseChunk: () => {},
-        agentType: 'researcher',
-        fileContext: mockFileContext,
-        localAgentTemplates: agentTemplates,
-        agentState,
-        prompt: 'Search for Next.js 15 new features',
-        params: undefined,
-      },
-    )
+    const { agentState: newAgentState } = await runAgentStep({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
+      system: 'Test system prompt',
+      userId: TEST_USER_ID,
+      userInputId: 'test-input',
+      clientSessionId: 'test-session',
+      fingerprintId: 'test-fingerprint',
+      onResponseChunk: () => {},
+      agentType: 'researcher',
+      fileContext: mockFileContext,
+      localAgentTemplates: agentTemplates,
+      agentState,
+      prompt: 'Search for Next.js 15 new features',
+      spawnParams: undefined,
+    })
 
-    expect(linkupApi.searchWeb).toHaveBeenCalledWith(
-      'Next.js 15 new features',
-      {
-        depth: 'standard',
-      },
-    )
+    expect(linkupApi.searchWeb).toHaveBeenCalledWith({
+      query: 'Next.js 15 new features',
+      depth: 'standard',
+      logger: expect.anything(),
+    })
 
     // Check that the search results were added to the message history
     const toolResultMessages = newAgentState.messageHistory.filter(
@@ -225,11 +232,14 @@ describe('web_search tool with researcher agent', () => {
       ...sessionState.mainAgentState,
       agentType: 'researcher' as const,
     }
-    const { agentTemplates } = assembleLocalAgentTemplates(
-      mockFileContextWithAgents,
-    )
+    const { agentTemplates } = assembleLocalAgentTemplates({
+      ...agentRuntimeImpl,
+      fileContext: mockFileContextWithAgents,
+    })
 
-    await runAgentStep(new MockWebSocket() as unknown as WebSocket, {
+    await runAgentStep({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
       system: 'Test system prompt',
       userId: TEST_USER_ID,
       userInputId: 'test-input',
@@ -241,15 +251,14 @@ describe('web_search tool with researcher agent', () => {
       localAgentTemplates: agentTemplates,
       agentState,
       prompt: 'Search for React Server Components tutorial with deep search',
-      params: undefined,
+      spawnParams: undefined,
     })
 
-    expect(linkupApi.searchWeb).toHaveBeenCalledWith(
-      'React Server Components tutorial',
-      {
-        depth: 'deep',
-      },
-    )
+    expect(linkupApi.searchWeb).toHaveBeenCalledWith({
+      query: 'React Server Components tutorial',
+      depth: 'deep',
+      logger: expect.anything(),
+    })
   })
 
   test('should handle case when no search results are found', async () => {
@@ -267,35 +276,34 @@ describe('web_search tool with researcher agent', () => {
       ...sessionState.mainAgentState,
       agentType: 'researcher' as const,
     }
-    const { agentTemplates } = assembleLocalAgentTemplates(
-      mockFileContextWithAgents,
-    )
+    const { agentTemplates } = assembleLocalAgentTemplates({
+      ...agentRuntimeImpl,
+      fileContext: mockFileContextWithAgents,
+    })
 
-    const { agentState: newAgentState } = await runAgentStep(
-      new MockWebSocket() as unknown as WebSocket,
-      {
-        system: 'Test system prompt',
-        userId: TEST_USER_ID,
-        userInputId: 'test-input',
-        clientSessionId: 'test-session',
-        fingerprintId: 'test-fingerprint',
-        onResponseChunk: () => {},
-        agentType: 'researcher',
-        fileContext: mockFileContext,
-        localAgentTemplates: agentTemplates,
-        agentState,
-        prompt: "Search for something that doesn't exist",
-        params: undefined,
-      },
-    )
+    const { agentState: newAgentState } = await runAgentStep({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
+      system: 'Test system prompt',
+      userId: TEST_USER_ID,
+      userInputId: 'test-input',
+      clientSessionId: 'test-session',
+      fingerprintId: 'test-fingerprint',
+      onResponseChunk: () => {},
+      agentType: 'researcher',
+      fileContext: mockFileContext,
+      localAgentTemplates: agentTemplates,
+      agentState,
+      prompt: "Search for something that doesn't exist",
+      spawnParams: undefined,
+    })
 
     // Verify that searchWeb was called
-    expect(linkupApi.searchWeb).toHaveBeenCalledWith(
-      'very obscure search query that returns nothing',
-      {
-        depth: 'standard',
-      },
-    )
+    expect(linkupApi.searchWeb).toHaveBeenCalledWith({
+      query: 'very obscure search query that returns nothing',
+      depth: 'standard',
+      logger: expect.anything(),
+    })
 
     // Check that the "no results found" message was added
     const toolResultMessages = newAgentState.messageHistory.filter(
@@ -326,31 +334,33 @@ describe('web_search tool with researcher agent', () => {
       ...sessionState.mainAgentState,
       agentType: 'researcher' as const,
     }
-    const { agentTemplates } = assembleLocalAgentTemplates(
-      mockFileContextWithAgents,
-    )
+    const { agentTemplates } = assembleLocalAgentTemplates({
+      ...agentRuntimeImpl,
+      fileContext: mockFileContextWithAgents,
+    })
 
-    const { agentState: newAgentState } = await runAgentStep(
-      new MockWebSocket() as unknown as WebSocket,
-      {
-        system: 'Test system prompt',
-        userId: TEST_USER_ID,
-        userInputId: 'test-input',
-        clientSessionId: 'test-session',
-        fingerprintId: 'test-fingerprint',
-        onResponseChunk: () => {},
-        agentType: 'researcher',
-        fileContext: mockFileContext,
-        localAgentTemplates: agentTemplates,
-        agentState,
-        prompt: 'Search for something',
-        params: undefined,
-      },
-    )
+    const { agentState: newAgentState } = await runAgentStep({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
+      system: 'Test system prompt',
+      userId: TEST_USER_ID,
+      userInputId: 'test-input',
+      clientSessionId: 'test-session',
+      fingerprintId: 'test-fingerprint',
+      onResponseChunk: () => {},
+      agentType: 'researcher',
+      fileContext: mockFileContext,
+      localAgentTemplates: agentTemplates,
+      agentState,
+      prompt: 'Search for something',
+      spawnParams: undefined,
+    })
 
     // Verify that searchWeb was called
-    expect(linkupApi.searchWeb).toHaveBeenCalledWith('test query', {
+    expect(linkupApi.searchWeb).toHaveBeenCalledWith({
+      query: 'test query',
       depth: 'standard',
+      logger: expect.anything(),
     })
 
     // Check that the error message was added
@@ -381,31 +391,33 @@ describe('web_search tool with researcher agent', () => {
       ...sessionState.mainAgentState,
       agentType: 'researcher' as const,
     }
-    const { agentTemplates } = assembleLocalAgentTemplates(
-      mockFileContextWithAgents,
-    )
+    const { agentTemplates } = assembleLocalAgentTemplates({
+      ...agentRuntimeImpl,
+      fileContext: mockFileContextWithAgents,
+    })
 
-    const { agentState: newAgentState } = await runAgentStep(
-      new MockWebSocket() as unknown as WebSocket,
-      {
-        system: 'Test system prompt',
-        userId: TEST_USER_ID,
-        userInputId: 'test-input',
-        clientSessionId: 'test-session',
-        fingerprintId: 'test-fingerprint',
-        onResponseChunk: () => {},
-        agentType: 'researcher',
-        fileContext: mockFileContext,
-        localAgentTemplates: agentTemplates,
-        agentState,
-        prompt: 'Search for something',
-        params: undefined,
-      },
-    )
+    const { agentState: newAgentState } = await runAgentStep({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
+      system: 'Test system prompt',
+      userId: TEST_USER_ID,
+      userInputId: 'test-input',
+      clientSessionId: 'test-session',
+      fingerprintId: 'test-fingerprint',
+      onResponseChunk: () => {},
+      agentType: 'researcher',
+      fileContext: mockFileContext,
+      localAgentTemplates: agentTemplates,
+      agentState,
+      prompt: 'Search for something',
+      spawnParams: undefined,
+    })
 
     // Verify that searchWeb was called
-    expect(linkupApi.searchWeb).toHaveBeenCalledWith('test query', {
+    expect(linkupApi.searchWeb).toHaveBeenCalledWith({
+      query: 'test query',
       depth: 'standard',
+      logger: expect.anything(),
     })
   })
 
@@ -426,31 +438,33 @@ describe('web_search tool with researcher agent', () => {
       ...sessionState.mainAgentState,
       agentType: 'researcher' as const,
     }
-    const { agentTemplates } = assembleLocalAgentTemplates(
-      mockFileContextWithAgents,
-    )
+    const { agentTemplates } = assembleLocalAgentTemplates({
+      ...agentRuntimeImpl,
+      fileContext: mockFileContextWithAgents,
+    })
 
-    const { agentState: newAgentState } = await runAgentStep(
-      new MockWebSocket() as unknown as WebSocket,
-      {
-        system: 'Test system prompt',
-        userId: TEST_USER_ID,
-        userInputId: 'test-input',
-        clientSessionId: 'test-session',
-        fingerprintId: 'test-fingerprint',
-        onResponseChunk: () => {},
-        agentType: 'researcher',
-        fileContext: mockFileContext,
-        localAgentTemplates: agentTemplates,
-        agentState,
-        prompt: 'Search for something',
-        params: undefined,
-      },
-    )
+    const { agentState: newAgentState } = await runAgentStep({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
+      system: 'Test system prompt',
+      userId: TEST_USER_ID,
+      userInputId: 'test-input',
+      clientSessionId: 'test-session',
+      fingerprintId: 'test-fingerprint',
+      onResponseChunk: () => {},
+      agentType: 'researcher',
+      fileContext: mockFileContext,
+      localAgentTemplates: agentTemplates,
+      agentState,
+      prompt: 'Search for something',
+      spawnParams: undefined,
+    })
 
     // Verify that searchWeb was called
-    expect(linkupApi.searchWeb).toHaveBeenCalledWith('test query', {
+    expect(linkupApi.searchWeb).toHaveBeenCalledWith({
+      query: 'test query',
       depth: 'standard',
+      logger: expect.anything(),
     })
 
     // Check that the error message was added
@@ -483,31 +497,33 @@ describe('web_search tool with researcher agent', () => {
       ...sessionState.mainAgentState,
       agentType: 'researcher' as const,
     }
-    const { agentTemplates } = assembleLocalAgentTemplates(
-      mockFileContextWithAgents,
-    )
+    const { agentTemplates } = assembleLocalAgentTemplates({
+      ...agentRuntimeImpl,
+      fileContext: mockFileContextWithAgents,
+    })
 
-    const { agentState: newAgentState } = await runAgentStep(
-      new MockWebSocket() as unknown as WebSocket,
-      {
-        system: 'Test system prompt',
-        userId: TEST_USER_ID,
-        userInputId: 'test-input',
-        clientSessionId: 'test-session',
-        fingerprintId: 'test-fingerprint',
-        onResponseChunk: () => {},
-        agentType: 'researcher',
-        fileContext: mockFileContextWithAgents,
-        localAgentTemplates: agentTemplates,
-        agentState,
-        prompt: 'Test search result formatting',
-        params: undefined,
-      },
-    )
+    const { agentState: newAgentState } = await runAgentStep({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
+      system: 'Test system prompt',
+      userId: TEST_USER_ID,
+      userInputId: 'test-input',
+      clientSessionId: 'test-session',
+      fingerprintId: 'test-fingerprint',
+      onResponseChunk: () => {},
+      agentType: 'researcher',
+      fileContext: mockFileContextWithAgents,
+      localAgentTemplates: agentTemplates,
+      agentState,
+      prompt: 'Test search result formatting',
+      spawnParams: undefined,
+    })
 
     // Verify that searchWeb was called
-    expect(linkupApi.searchWeb).toHaveBeenCalledWith('test formatting', {
+    expect(linkupApi.searchWeb).toHaveBeenCalledWith({
+      query: 'test formatting',
       depth: 'standard',
+      logger: expect.anything(),
     })
 
     // Check that the search results were formatted correctly

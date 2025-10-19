@@ -1,13 +1,12 @@
 import { openaiModels, openrouterModels } from '@codebuff/common/old-constants'
 
-import { logger } from '../util/logger'
-import { promptAiSdk } from './vercel-ai-sdk/ai-sdk'
-
 import type {
   CostMode,
   FinetunedVertexModel,
-  Model,
 } from '@codebuff/common/old-constants'
+import type { PromptAiSdkFn } from '@codebuff/common/types/contracts/llm'
+import type { Logger } from '@codebuff/common/types/contracts/logger'
+import type { ParamsExcluding } from '@codebuff/common/types/function-params'
 import type { Message } from '@codebuff/common/types/messages/codebuff-message'
 
 /**
@@ -36,33 +35,30 @@ import type { Message } from '@codebuff/common/types/messages/codebuff-message'
  * @throws If all API calls (primary and fallbacks) fail.
  */
 export async function promptFlashWithFallbacks(
-  messages: Message[],
-  options: {
-    clientSessionId: string
-    fingerprintId: string
-    userInputId: string
-    model: Model
-    userId: string | undefined
-    maxTokens?: number
-    temperature?: number
+  params: {
+    messages: Message[]
     costMode?: CostMode
     useGPT4oInsteadOfClaude?: boolean
     thinkingBudget?: number
     useFinetunedModel?: FinetunedVertexModel | undefined
-  },
+    promptAiSdk: PromptAiSdkFn
+    logger: Logger
+  } & ParamsExcluding<PromptAiSdkFn, 'messages'>,
 ): Promise<string> {
   const {
+    messages,
     costMode,
     useGPT4oInsteadOfClaude,
     useFinetunedModel,
-    ...geminiOptions
-  } = options
+    promptAiSdk,
+    logger,
+  } = params
 
   // Try finetuned model first if enabled
   if (useFinetunedModel) {
     try {
       return await promptAiSdk({
-        ...geminiOptions,
+        ...params,
         messages,
         model: useFinetunedModel,
       })
@@ -76,14 +72,14 @@ export async function promptFlashWithFallbacks(
 
   try {
     // First try Gemini
-    return await promptAiSdk({ ...geminiOptions, messages })
+    return await promptAiSdk({ ...params, messages })
   } catch (error) {
     logger.warn(
       { error },
       `Error calling Gemini API, falling back to ${useGPT4oInsteadOfClaude ? 'gpt-4o' : 'Claude'}`,
     )
     return await promptAiSdk({
-      ...geminiOptions,
+      ...params,
       messages,
       model: useGPT4oInsteadOfClaude
         ? openaiModels.gpt4o

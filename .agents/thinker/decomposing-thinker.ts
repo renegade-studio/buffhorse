@@ -44,11 +44,13 @@ const definition: SecretAgentDefinition = {
     }
 
     const thoughts = toolResult
-      ? toolResult.map((result) => (result.type === 'json' ? result.value : ''))
+      ? toolResult.map((result) =>
+          result.type === 'json' ? result.value : '',
+        )[0]
       : []
     yield {
       toolName: 'set_output',
-      input: { results: thoughts },
+      input: { thoughts },
     }
   },
 }

@@ -3,14 +3,9 @@ import { BigQuery } from '@google-cloud/bigquery'
 
 import { MESSAGE_SCHEMA, RELABELS_SCHEMA, TRACES_SCHEMA } from './schema'
 
-import type {
-  BaseTrace,
-  GetRelevantFilesTrace,
-  MessageRow,
-  Relabel,
-  Trace,
-} from './schema'
-import type { Logger } from '@codebuff/types/logger'
+import type { BaseTrace, GetRelevantFilesTrace, Relabel, Trace } from './schema'
+import type { MessageRow } from '@codebuff/common/types/contracts/bigquery'
+import type { Logger } from '@codebuff/common/types/contracts/logger'
 
 const DATASET =
   process.env.NEXT_PUBLIC_CB_ENVIRONMENT === 'prod'
@@ -99,7 +94,7 @@ export async function setupBigQuery({
   }
 }
 
-export async function insertMessage({
+export async function insertMessageBigquery({
   row,
   dataset = DATASET,
   logger,
@@ -153,10 +148,11 @@ export async function insertTrace({
 
     await getClient().dataset(dataset).table(TRACES_TABLE).insert(traceToInsert)
 
-    logger.debug(
-      { traceId: trace.id, type: trace.type },
-      'Inserted trace into BigQuery',
-    )
+    // Note (James): This log was too noisy.
+    // logger.debug(
+    //   { traceId: trace.id, type: trace.type },
+    //   'Inserted trace into BigQuery',
+    // )
     return true
   } catch (error) {
     logger.error(

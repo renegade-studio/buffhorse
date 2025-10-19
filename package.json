@@ -13,7 +13,8 @@
     "scripts",
     "evals",
     "sdk",
-    ".agents"
+    ".agents",
+    "cli"
   ],
   "scripts": {
     "dev": "bash scripts/dev.sh",
@@ -71,5 +72,5 @@
   "engines": {
     "node": ">=20.0.0"
   },
-  "packageManager": "bun@1.0.0"
+  "packageManager": "bun@1.2.12"
 }

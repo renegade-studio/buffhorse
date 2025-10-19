@@ -12,6 +12,7 @@ export interface FileState {
 
 export interface EvalCommit {
   sha: string
+  parentSha: string // The commit right before the target commit -- what the coding agent checks out.
   spec: string
   fileStates: FileState[] // Ground truth file states
 }
@@ -27,6 +28,7 @@ export interface EvalData {
 // Input structure for creating evaluations (from gen-evals)
 export interface EvalInput {
   commitSha: string // Required - defines the codebase state to load for the task
+  parentSha?: string // Optional - if not provided, will compute from commit parent
   fileStates?: FileState[] // Optional - if not provided, will compute from commit parent
 }
 
@@ -119,4 +121,46 @@ export interface EvalResult {
   analysis?: PostEvalAnalysis
   error?: string
   duration: number
+}
+
+export interface AgentComparisonResult {
+  agentId: string
+  displayName: string
+  evalSetResults: Map<string, FullEvalLog>
+  overallMetrics: {
+    avgOverallScore: number
+    avgCompletionScore: number
+    avgCodeQualityScore: number
+    avgCostUsd: number
+    avgDurationMs: number
+    successRate: number
+  }
+}
+
+export interface MultiAgentEvalSummary {
+  agents: AgentComparisonResult[]
+  evalSets: string[]
+  timestamp: string
+  totalDuration: number
+}
+
+export interface AgentComparisonResult {
+  agentId: string
+  displayName: string
+  evalSetResults: Map<string, FullEvalLog>
+  overallMetrics: {
+    avgOverallScore: number
+    avgCompletionScore: number
+    avgCodeQualityScore: number
+    avgCostUsd: number
+    avgDurationMs: number
+    successRate: number
+  }
+}
+
+export interface MultiAgentEvalSummary {
+  agents: AgentComparisonResult[]
+  evalSets: string[]
+  timestamp: string
+  totalDuration: number
 }

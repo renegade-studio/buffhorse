@@ -1,15 +1,18 @@
+import { promptAiSdk } from '@codebuff/backend/llm-apis/vercel-ai-sdk/ai-sdk'
 import { getTracesAndRelabelsForUser, setupBigQuery } from '@codebuff/bigquery'
 
 import { gradeRun } from '../../backend/src/admin/grade-runs'
 
-import type { Logger } from '@codebuff/types/logger'
+import type { Logger } from '@codebuff/common/types/contracts/logger'
 
 // Parse command line arguments to check for --prod flag
 const isProd = process.argv.includes('--prod')
 const DATASET = isProd ? 'codebuff_data' : 'codebuff_data_dev'
 const MAX_PARALLEL = 1 // Maximum number of traces to process in parallel
 
-async function gradeTraces({ logger }: { logger: Logger }) {
+async function gradeTraces(params: { logger: Logger }) {
+  const { logger } = params
+
   try {
     // Initialize BigQuery
     await setupBigQuery({ dataset: DATASET, logger: console })
@@ -46,7 +49,12 @@ async function gradeTraces({ logger }: { logger: Logger }) {
         batch.map(async (traceAndRelabels) => {
           try {
             console.log(`Grading trace ${traceAndRelabels.trace.id}`)
-            const result = await gradeRun(traceAndRelabels)
+            const result = await gradeRun({
+              ...traceAndRelabels,
+              promptAiSdk,
+              sendAction: () => {},
+              logger,
+            })
             return {
               traceId: traceAndRelabels.trace.id,
               status: 'success',

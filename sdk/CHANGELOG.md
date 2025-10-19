@@ -2,6 +2,23 @@
 
 All notable changes to the @codebuff/sdk package will be documented in this file.
 
+## [0.4.3]
+
+### Added
+
+- Exported `processToolCallBuffer` and state helpers so SDK consumers can strip `<codebuff_tool_call>` segments mid-stream.
+- CLI now consumes the shared helper to avoid leaking XML when responses arrive without token streaming.
+- Extra regression tests covering multi-chunk tool-call payloads based on the CLI log case ("I'll help you commit").
+
+## [0.4.2]
+
+### Added
+
+- XML tool call filtering in stream chunks - filters out `<codebuff_tool_call>` tags while preserving response text
+- Stateful parser handles tags split across chunk boundaries
+- 50-character safety buffer for split tag detection
+- Comprehensive unit tests (17 test cases)
+
 ## [0.3.1]
 
 - `CodebuffClient.run` now does not return `null`. Instead, the `CodebuffClient.run(...).output.type` will be `'error'`.

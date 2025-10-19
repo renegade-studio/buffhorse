@@ -1,10 +1,14 @@
 import db from '@codebuff/common/db'
 import * as schema from '@codebuff/common/db/schema'
-import { logger } from '@codebuff/common/util/logger'
 import { eq } from 'drizzle-orm'
 import { LoopsClient, APIError } from 'loops'
 
 import type { LoopsEmailData, SendEmailResult } from './types'
+import type {
+  ParamsExcluding,
+  OptionalFields,
+} from '@codebuff/common/types/function-params'
+import type { Logger } from '@codebuff/common/types/contracts/logger'
 
 const ORGANIZATION_INVITATION_TRANSACTIONAL_ID = 'cmbikixxm15xo4a0iiemzkzw1'
 const BASIC_TRANSACTIONAL_ID = 'cmb8pafk92r820w0i7lkplkt2'
@@ -16,10 +20,22 @@ if (process.env.LOOPS_API_KEY) {
 }
 
 async function sendTransactionalEmail(
-  transactionalId: string,
-  email: string,
-  dataVariables: Record<string, any> = {},
+  params: OptionalFields<
+    {
+      transactionalId: string
+      email: string
+      dataVariables: Record<string, any>
+      logger: Logger
+    },
+    'dataVariables'
+  >,
 ): Promise<SendEmailResult> {
+  const withDefaults = {
+    dataVariables: {},
+    ...params,
+  }
+  const { transactionalId, email, dataVariables, logger } = withDefaults
+
   if (!loopsClient) {
     return {
       success: false,
@@ -63,11 +79,14 @@ async function sendTransactionalEmail(
   }
 }
 
-export async function sendSignupEventToLoops(
-  userId: string,
-  email: string | null,
-  name: string | null,
-): Promise<void> {
+export async function sendSignupEventToLoops(params: {
+  userId: string
+  email: string | null
+  name: string | null
+  logger: Logger
+}): Promise<void> {
+  const { userId, email, name, logger } = params
+
   if (!loopsClient) {
     logger.warn({ userId }, 'Loops SDK not initialized. Skipping signup event.')
     return
@@ -116,9 +135,12 @@ export async function sendSignupEventToLoops(
   }
 }
 
-export async function sendOrganizationInvitationEmail(
-  data: LoopsEmailData, // data no longer contains firstName
-): Promise<SendEmailResult> {
+export async function sendOrganizationInvitationEmail(params: {
+  data: LoopsEmailData // data no longer contains firstName
+  logger: Logger
+}): Promise<SendEmailResult> {
+  const { data, logger } = params
+
   let lookedUpFirstName: string = 'there' // Default to 'there'
   try {
     const inviteeUserRecord = await db
@@ -142,25 +164,36 @@ export async function sendOrganizationInvitationEmail(
     // Continue with default name 'there'
   }
 
-  return sendTransactionalEmail(
-    ORGANIZATION_INVITATION_TRANSACTIONAL_ID,
-    data.email,
-    {
+  return sendTransactionalEmail({
+    transactionalId: ORGANIZATION_INVITATION_TRANSACTIONAL_ID,
+    email: data.email,
+    dataVariables: {
       firstName: lookedUpFirstName, // Use the looked-up or default name
       organizationName: data.organizationName || '', // data.organizationName is still expected
       inviterName: data.inviterName || '', // data.inviterName is still expected
       invitationUrl: data.invitationUrl || '', // data.invitationUrl is still expected
       role: data.role || 'member', // data.role is still expected
     },
-  )
+    logger,
+  })
 }
 
 export async function sendBasicEmail(
-  email: string,
-  data: { subject: string; message: string },
+  params: {
+    data: { subject: string; message: string }
+  } & ParamsExcluding<
+    typeof sendTransactionalEmail,
+    'transactionalId' | 'dataVariables'
+  >,
 ): Promise<SendEmailResult> {
-  return sendTransactionalEmail(BASIC_TRANSACTIONAL_ID, email, {
-    subject: data.subject,
-    message: data.message,
+  const { data } = params
+
+  return sendTransactionalEmail({
+    ...params,
+    transactionalId: BASIC_TRANSACTIONAL_ID,
+    dataVariables: {
+      subject: data.subject,
+      message: data.message,
+    },
   })
 }

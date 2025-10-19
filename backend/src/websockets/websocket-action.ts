@@ -1,12 +1,10 @@
+import { assembleLocalAgentTemplates } from '@codebuff/agent-runtime/templates/agent-registry'
 import { calculateUsageAndBalance } from '@codebuff/billing'
 import { trackEvent } from '@codebuff/common/analytics'
 import { AnalyticsEvent } from '@codebuff/common/constants/analytics-events'
 import db from '@codebuff/common/db/index'
 import * as schema from '@codebuff/common/db/schema'
-import { toOptionalFile } from '@codebuff/common/old-constants'
 import { getErrorObject } from '@codebuff/common/util/error'
-import { ensureEndsWithNewline } from '@codebuff/common/util/file'
-import { generateCompactId } from '@codebuff/common/util/string'
 import { eq } from 'drizzle-orm'
 
 import {
@@ -16,57 +14,16 @@ import {
 } from '../live-user-inputs'
 import { mainPrompt } from '../main-prompt'
 import { protec } from './middleware'
-import { sendMessage } from './server'
-import { assembleLocalAgentTemplates } from '../templates/agent-registry'
-import { logger, withLoggerContext } from '../util/logger'
+import { sendActionWs } from '../client-wrapper'
+import { withLoggerContext } from '../util/logger'
 
-import type {
-  ClientAction,
-  ServerAction,
-  UsageResponse,
-} from '@codebuff/common/actions'
-import type { MCPConfig } from '@codebuff/common/types/mcp'
-import type { ToolResultOutput } from '@codebuff/common/types/messages/content-part'
+import type { ClientAction, UsageResponse } from '@codebuff/common/actions'
+import type { SendActionFn } from '@codebuff/common/types/contracts/client'
+import type { GetUserInfoFromApiKeyFn } from '@codebuff/common/types/contracts/database'
+import type { Logger } from '@codebuff/common/types/contracts/logger'
+import type { ParamsExcluding } from '@codebuff/common/types/function-params'
 import type { ClientMessage } from '@codebuff/common/websockets/websocket-schema'
 import type { WebSocket } from 'ws'
-
-/**
- * Sends an action to the client via WebSocket
- * @param ws - The WebSocket connection to send the action to
- * @param action - The server action to send
- */
-export const sendAction = (ws: WebSocket, action: ServerAction) => {
-  sendMessage(ws, {
-    type: 'action',
-    data: action,
-  })
-}
-
-/**
- * Retrieves a user ID from an authentication token
- * @param authToken - The authentication token to validate
- * @returns The user ID if found, undefined otherwise
- */
-export const getUserIdFromAuthToken = async (params: {
-  authToken?: string
-}): Promise<string | undefined> => {
-  const { authToken } = params
-  if (!authToken) return undefined
-
-  const userId = await db
-    .select({ userId: schema.user.id })
-    .from(schema.user)
-    .innerJoin(schema.session, eq(schema.user.id, schema.session.userId))
-    .where(eq(schema.session.sessionToken, authToken))
-    .then((users) => {
-      if (users.length === 1) {
-        return users[0].userId
-      }
-      return undefined
-    })
-
-  return userId
-}
 
 /**
  * Generates a usage response object for the client
@@ -79,8 +36,9 @@ export async function genUsageResponse(params: {
   fingerprintId: string
   userId: string
   clientSessionId?: string
+  logger: Logger
 }): Promise<UsageResponse> {
-  const { fingerprintId, userId, clientSessionId } = params
+  const { fingerprintId, userId, clientSessionId, logger } = params
   const logContext = { fingerprintId, userId, sessionId: clientSessionId }
   const defaultResp = {
     type: 'usage-response' as const,
@@ -104,7 +62,11 @@ export async function genUsageResponse(params: {
     try {
       // Get the usage data
       const { balance: balanceDetails, usageThisCycle } =
-        await calculateUsageAndBalance(userId, new Date())
+        await calculateUsageAndBalance({
+          userId,
+          quotaResetDate: new Date(),
+          logger,
+        })
 
       return {
         type: 'usage-response' as const,
@@ -131,16 +93,23 @@ export async function genUsageResponse(params: {
  * @param ws - The WebSocket connection
  */
 const onPrompt = async (
-  action: ClientAction<'prompt'>,
-  clientSessionId: string,
-  ws: WebSocket,
+  params: {
+    action: ClientAction<'prompt'>
+    ws: WebSocket
+    getUserInfoFromApiKey: GetUserInfoFromApiKeyFn
+    logger: Logger
+  } & ParamsExcluding<typeof callMainPrompt, 'userId' | 'promptId'>,
 ) => {
+  const { action, ws, getUserInfoFromApiKey, logger } = params
   const { fingerprintId, authToken, promptId, prompt, costMode } = action
 
   await withLoggerContext(
     { fingerprintId, clientRequestId: promptId, costMode },
     async () => {
-      const userId = await getUserIdFromAuthToken({ authToken })
+      const userId = authToken
+        ? (await getUserInfoFromApiKey({ apiKey: authToken, fields: ['id'] }))
+            ?.id
+        : null
       if (!userId) {
         throw new Error('User not found')
       }
@@ -161,10 +130,10 @@ const onPrompt = async (
       startUserInput({ userId, userInputId: promptId })
 
       try {
-        const result = await callMainPrompt(ws, action, {
+        const result = await callMainPrompt({
+          ...params,
           userId,
           promptId,
-          clientSessionId,
         })
         if (result.output.type === 'error') {
           throw new Error(result.output.message)
@@ -174,33 +143,42 @@ const onPrompt = async (
         let response =
           e && typeof e === 'object' && 'message' in e ? `${e.message}` : `${e}`
 
-        sendAction(ws, {
-          type: 'prompt-error',
-          userInputId: promptId,
-          message: response,
+        sendActionWs({
+          ws,
+          action: {
+            type: 'prompt-error',
+            userInputId: promptId,
+            message: response,
+          },
         })
       } finally {
-        cancelUserInput({ userId, userInputId: promptId })
+        cancelUserInput({ userId, userInputId: promptId, logger })
         const usageResponse = await genUsageResponse({
           fingerprintId,
           userId,
+          logger,
         })
-        sendAction(ws, usageResponse)
+        sendActionWs({ ws, action: usageResponse })
       }
     },
   )
 }
 
 export const callMainPrompt = async (
-  ws: WebSocket,
-  action: ClientAction<'prompt'>,
-  options: {
+  params: {
+    action: ClientAction<'prompt'>
     userId: string
     promptId: string
     clientSessionId: string
-  },
+    sendAction: SendActionFn
+    logger: Logger
+  } & ParamsExcluding<
+    typeof mainPrompt,
+    'localAgentTemplates' | 'onResponseChunk'
+  >,
 ) => {
-  const { userId, promptId, clientSessionId } = options
+  const { action, userId, promptId, clientSessionId, sendAction, logger } =
+    params
   const { fileContext } = action.sessionState
 
   // Enforce server-side state authority: reset creditsUsed to 0
@@ -210,37 +188,44 @@ export const callMainPrompt = async (
 
   // Assemble local agent templates from fileContext
   const { agentTemplates: localAgentTemplates, validationErrors } =
-    assembleLocalAgentTemplates(fileContext)
+    assembleLocalAgentTemplates({ fileContext, logger })
 
   if (validationErrors.length > 0) {
-    sendAction(ws, {
-      type: 'prompt-error',
-      message: `Invalid agent config: ${validationErrors.map((err) => err.message).join('\n')}`,
-      userInputId: promptId,
+    sendAction({
+      action: {
+        type: 'prompt-error',
+        message: `Invalid agent config: ${validationErrors.map((err) => err.message).join('\n')}`,
+        userInputId: promptId,
+      },
     })
   }
 
-  sendAction(ws, {
-    type: 'response-chunk',
-    userInputId: promptId,
-    chunk: {
-      type: 'start',
-      agentId: action.sessionState.mainAgentState.agentType ?? undefined,
-      messageHistoryLength:
-        action.sessionState.mainAgentState.messageHistory.length,
+  sendAction({
+    action: {
+      type: 'response-chunk',
+      userInputId: promptId,
+      chunk: {
+        type: 'start',
+        agentId: action.sessionState.mainAgentState.agentType ?? undefined,
+        messageHistoryLength:
+          action.sessionState.mainAgentState.messageHistory.length,
+      },
     },
   })
 
-  const result = await mainPrompt(ws, action, {
-    userId,
-    clientSessionId,
+  const result = await mainPrompt({
+    ...params,
     localAgentTemplates,
     onResponseChunk: (chunk) => {
-      if (checkLiveUserInput(userId, promptId, clientSessionId)) {
-        sendAction(ws, {
-          type: 'response-chunk',
-          userInputId: promptId,
-          chunk,
+      if (
+        checkLiveUserInput({ userId, userInputId: promptId, clientSessionId })
+      ) {
+        sendAction({
+          action: {
+            type: 'response-chunk',
+            userInputId: promptId,
+            chunk,
+          },
         })
       }
     },
@@ -248,24 +233,28 @@ export const callMainPrompt = async (
 
   const { sessionState, output } = result
 
-  sendAction(ws, {
-    type: 'response-chunk',
-    userInputId: promptId,
-    chunk: {
-      type: 'finish',
-      agentId: sessionState.mainAgentState.agentType ?? undefined,
-      totalCost: sessionState.mainAgentState.creditsUsed,
+  sendAction({
+    action: {
+      type: 'response-chunk',
+      userInputId: promptId,
+      chunk: {
+        type: 'finish',
+        agentId: sessionState.mainAgentState.agentType ?? undefined,
+        totalCost: sessionState.mainAgentState.creditsUsed,
+      },
     },
   })
 
   // Send prompt data back
-  sendAction(ws, {
-    type: 'prompt-response',
-    promptId,
-    sessionState,
-    toolCalls: [],
-    toolResults: [],
-    output,
+  sendAction({
+    action: {
+      type: 'prompt-response',
+      promptId,
+      sessionState,
+      toolCalls: [],
+      toolResults: [],
+      output,
+    },
   })
 
   return result
@@ -279,20 +268,30 @@ export const callMainPrompt = async (
  * @param clientSessionId - The client's session ID
  * @param ws - The WebSocket connection
  */
-const onInit = async (
-  { fileContext, fingerprintId, authToken }: ClientAction<'init'>,
-  clientSessionId: string,
-  ws: WebSocket,
-) => {
+const onInit = async (params: {
+  action: ClientAction<'init'>
+  clientSessionId: string
+  ws: WebSocket
+  getUserInfoFromApiKey: GetUserInfoFromApiKeyFn
+  logger: Logger
+}) => {
+  const { action, clientSessionId, ws, getUserInfoFromApiKey, logger } = params
+  const { fileContext, fingerprintId, authToken } = action
+
   await withLoggerContext({ fingerprintId }, async () => {
-    const userId = await getUserIdFromAuthToken({ authToken })
+    const userId = authToken
+      ? (await getUserInfoFromApiKey({ apiKey: authToken, fields: ['id'] }))?.id
+      : undefined
 
     if (!userId) {
-      sendAction(ws, {
-        usage: 0,
-        remainingBalance: 0,
-        next_quota_reset: null,
-        type: 'init-response',
+      sendActionWs({
+        ws,
+        action: {
+          usage: 0,
+          remainingBalance: 0,
+          next_quota_reset: null,
+          type: 'init-response',
+        },
       })
       return
     }
@@ -302,24 +301,34 @@ const onInit = async (
       fingerprintId,
       userId,
       clientSessionId,
+      logger,
     })
-    sendAction(ws, {
-      ...usageResponse,
-      type: 'init-response',
+    sendActionWs({
+      ws,
+      action: {
+        ...usageResponse,
+        type: 'init-response',
+      },
     })
   })
 }
 
-const onCancelUserInput = async ({
-  authToken,
-  promptId,
-}: ClientAction<'cancel-user-input'>) => {
-  const userId = await getUserIdFromAuthToken({ authToken })
+const onCancelUserInput = async (params: {
+  action: ClientAction<'cancel-user-input'>
+  getUserInfoFromApiKey: GetUserInfoFromApiKeyFn
+  logger: Logger
+}) => {
+  const { action, getUserInfoFromApiKey, logger } = params
+  const { authToken, promptId } = action
+
+  const userId = (
+    await getUserInfoFromApiKey({ apiKey: authToken, fields: ['id'] })
+  )?.id
   if (!userId) {
     logger.error({ authToken }, 'User id not found for authToken')
     return
   }
-  cancelUserInput({ userId, userInputId: promptId })
+  cancelUserInput({ userId, userInputId: promptId, logger })
 }
 
 /**
@@ -364,11 +373,14 @@ export const subscribeToAction = <T extends ClientAction['type']>(
  * @param clientSessionId - The client's session ID
  * @param msg - The action message from the client
  */
-export const onWebsocketAction = async (
-  ws: WebSocket,
-  clientSessionId: string,
-  msg: ClientMessage & { type: 'action' },
-) => {
+export const onWebsocketAction = async (params: {
+  ws: WebSocket
+  clientSessionId: string
+  msg: ClientMessage & { type: 'action' }
+  logger: Logger
+}) => {
+  const { ws, clientSessionId, msg, logger } = params
+
   await withLoggerContext({ clientSessionId }, async () => {
     const callbacks = callbacksByAction[msg.data.type] ?? []
     try {
@@ -388,182 +400,9 @@ export const onWebsocketAction = async (
 }
 
 // Register action handlers
-subscribeToAction('prompt', protec.run(onPrompt))
-subscribeToAction('init', protec.run(onInit, { silent: true }))
-subscribeToAction('cancel-user-input', protec.run(onCancelUserInput))
-
-/**
- * Requests multiple files from the client
- * @param ws - The WebSocket connection
- * @param filePaths - Array of file paths to request
- * @returns Promise resolving to an object mapping file paths to their contents
- */
-export async function requestFiles(params: {
-  ws: WebSocket
-  filePaths: string[]
-}) {
-  const { ws, filePaths } = params
-  return new Promise<Record<string, string | null>>((resolve) => {
-    const requestId = generateCompactId()
-    const unsubscribe = subscribeToAction('read-files-response', (action) => {
-      for (const [filename, contents] of Object.entries(action.files)) {
-        action.files[filename] = ensureEndsWithNewline(contents)
-      }
-      if (action.requestId === requestId) {
-        unsubscribe()
-        resolve(action.files)
-      }
-    })
-    sendAction(ws, {
-      type: 'read-files',
-      filePaths,
-      requestId,
-    })
-  })
-}
-
-/**
- * Requests a single file from the client
- * @param ws - The WebSocket connection
- * @param filePath - The path of the file to request
- * @returns Promise resolving to the file contents or null if not found
- */
-export async function requestFile(params: {
-  ws: WebSocket
-  filePath: string
-}) {
-  const { ws, filePath } = params
-  const files = await requestFiles({ ws, filePaths: [filePath] })
-  return files[filePath] ?? null
-}
-
-export async function requestOptionalFile(params: {
-  ws: WebSocket
-  filePath: string
-}) {
-  const { ws, filePath } = params
-  const file = await requestFile({ ws, filePath })
-  return toOptionalFile(file)
-}
-
-/**
- * Requests a tool call execution from the client with timeout support
- * @param ws - The WebSocket connection
- * @param toolName - Name of the tool to execute
- * @param input - Arguments for the tool (can include timeout)
- * @returns Promise resolving to the tool execution result
- */
-export async function requestToolCall(
-  ws: WebSocket,
-  userInputId: string,
-  toolName: string,
-  input: Record<string, any> & { timeout_seconds?: number },
-  mcpConfig?: MCPConfig,
-): Promise<{
-  output: ToolResultOutput[]
-}> {
-  return new Promise((resolve) => {
-    const requestId = generateCompactId()
-    const timeoutInSeconds =
-      (input.timeout_seconds || 30) < 0
-        ? undefined
-        : input.timeout_seconds || 30
-
-    // Set up timeout
-    const timeoutHandle =
-      timeoutInSeconds === undefined
-        ? undefined
-        : setTimeout(
-            () => {
-              unsubscribe()
-              resolve({
-                output: [
-                  {
-                    type: 'json',
-                    value: {
-                      errorMessage: `Tool call '${toolName}' timed out after ${timeoutInSeconds}s`,
-                    },
-                  },
-                ],
-              })
-            },
-            timeoutInSeconds * 1000 + 5000, // Convert to ms and add a small buffer
-          )
-
-    // Subscribe to response
-    const unsubscribe = subscribeToAction('tool-call-response', (action) => {
-      if (action.requestId === requestId) {
-        clearTimeout(timeoutHandle)
-        unsubscribe()
-        resolve({
-          output: action.output,
-        })
-      }
-    })
-
-    // Send the request
-    sendAction(ws, {
-      type: 'tool-call-request',
-      requestId,
-      userInputId,
-      toolName,
-      input,
-      timeout:
-        timeoutInSeconds === undefined ? undefined : timeoutInSeconds * 1000, // Send timeout in milliseconds
-      mcpConfig,
-    })
-  })
-}
-
-/**
- * Requests a tool call execution from the client with timeout support
- * @param ws - The WebSocket connection
- * @param mcpConfig - The configuration for the MCP server
- * @param input - Arguments for the tool (can include timeout)
- * @returns Promise resolving to the tool execution result
- */
-export async function requestMcpToolData({
-  ws,
-  mcpConfig,
-  toolNames,
-}: {
-  ws: WebSocket
-  mcpConfig: MCPConfig
-  toolNames: string[] | null
-}): Promise<
-  {
-    name: string
-    description?: string
-    inputSchema: unknown
-  }[]
-> {
-  return new Promise((resolve) => {
-    const requestId = generateCompactId()
-
-    // Set up timeout
-    const timeoutHandle = setTimeout(
-      () => {
-        unsubscribe()
-        resolve([])
-      },
-      45_000 + 5000, // Convert to ms and add a small buffer
-    )
-
-    // Subscribe to response
-    const unsubscribe = subscribeToAction('mcp-tool-data', (action) => {
-      if (action.requestId === requestId) {
-        clearTimeout(timeoutHandle)
-        unsubscribe()
-        resolve(action.tools)
-      }
-    })
-
-    // Send the request
-    sendAction(ws, {
-      type: 'request-mcp-tool-data',
-      mcpConfig,
-      requestId,
-      ...(toolNames && { toolNames }),
-    })
-  })
-}
+subscribeToAction('prompt', protec.run({ baseAction: onPrompt }))
+subscribeToAction('init', protec.run({ baseAction: onInit, silent: true }))
+subscribeToAction(
+  'cancel-user-input',
+  protec.run({ baseAction: onCancelUserInput }),
+)

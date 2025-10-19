@@ -1,6 +1,10 @@
 import * as bigquery from '@codebuff/bigquery'
 import * as analytics from '@codebuff/common/analytics'
 import { TEST_USER_ID } from '@codebuff/common/old-constants'
+import {
+  TEST_AGENT_RUNTIME_IMPL,
+  TEST_AGENT_RUNTIME_SCOPED_IMPL,
+} from '@codebuff/common/testing/impl/agent-runtime'
 import { getToolCallString } from '@codebuff/common/tools/utils'
 import {
   AgentTemplateTypes,
@@ -21,33 +25,35 @@ import * as checkTerminalCommandModule from '../check-terminal-command'
 import * as requestFilesPrompt from '../find-files/request-files-prompt'
 import * as getDocumentationForQueryModule from '../get-documentation-for-query'
 import * as liveUserInputs from '../live-user-inputs'
-import * as aisdk from '../llm-apis/vercel-ai-sdk/ai-sdk'
 import { mainPrompt } from '../main-prompt'
 import * as processFileBlockModule from '../process-file-block'
-import * as websocketAction from '../websockets/websocket-action'
 
 import type { AgentTemplate } from '@codebuff/common/types/agent-template'
+import type {
+  AgentRuntimeDeps,
+  AgentRuntimeScopedDeps,
+} from '@codebuff/common/types/contracts/agent-runtime'
+import type { RequestToolCallFn } from '@codebuff/common/types/contracts/client'
+import type { ParamsOf } from '@codebuff/common/types/function-params'
 import type { ProjectFileContext } from '@codebuff/common/util/file'
-import type { Logger } from '@codebuff/types/logger'
-import type { WebSocket } from 'ws'
+
+let agentRuntimeImpl: AgentRuntimeDeps
+let agentRuntimeScopedImpl: AgentRuntimeScopedDeps
 
 const mockAgentStream = (streamOutput: string) => {
-  spyOn(aisdk, 'promptAiSdkStream').mockImplementation(async function* ({}) {
+  agentRuntimeImpl.promptAiSdkStream = async function* ({}) {
     yield { type: 'text' as const, text: streamOutput }
     return 'mock-message-id'
-  })
+  }
 }
 
 describe('mainPrompt', () => {
   let mockLocalAgentTemplates: Record<string, any>
-  const logger: Logger = {
-    debug: () => {},
-    error: () => {},
-    info: () => {},
-    warn: () => {},
-  }
 
   beforeEach(() => {
+    agentRuntimeImpl = { ...TEST_AGENT_RUNTIME_IMPL }
+    agentRuntimeScopedImpl = { ...TEST_AGENT_RUNTIME_SCOPED_IMPL }
+
     // Setup common mock agent templates
     mockLocalAgentTemplates = {
       [AgentTemplateTypes.base]: {
@@ -83,12 +89,10 @@ describe('mainPrompt', () => {
         stepPrompt: '',
       } satisfies AgentTemplate,
     }
-  })
 
-  beforeEach(() => {
     // Mock analytics and tracing
     spyOn(analytics, 'initAnalytics').mockImplementation(() => {})
-    analytics.initAnalytics({ logger }) // Initialize the mock
+    analytics.initAnalytics(agentRuntimeImpl) // Initialize the mock
     spyOn(analytics, 'trackEvent').mockImplementation(() => {})
     spyOn(bigquery, 'insertTrace').mockImplementation(() =>
       Promise.resolve(true),
@@ -108,51 +112,40 @@ describe('mainPrompt', () => {
     )
 
     // Mock LLM APIs
-    spyOn(aisdk, 'promptAiSdk').mockImplementation(() =>
-      Promise.resolve('Test response'),
-    )
     mockAgentStream('Test response')
 
     // Mock websocket actions
-    spyOn(websocketAction, 'requestFiles').mockImplementation(
-      async (params: { ws: any; filePaths: string[] }) => {
-        const results: Record<string, string | null> = {}
-        params.filePaths.forEach((p) => {
-          if (p === 'test.txt') {
-            results[p] = 'mock content for test.txt'
-          } else {
-            results[p] = null
-          }
-        })
-        return results
-      },
-    )
-
-    spyOn(websocketAction, 'requestFile').mockImplementation(
-      async (params: { ws: any; filePath: string }) => {
-        if (params.filePath === 'test.txt') {
-          return 'mock content for test.txt'
+    agentRuntimeScopedImpl.requestFiles = async ({ filePaths }) => {
+      const results: Record<string, string | null> = {}
+      filePaths.forEach((p) => {
+        if (p === 'test.txt') {
+          results[p] = 'mock content for test.txt'
+        } else {
+          results[p] = null
         }
-        return null
-      },
-    )
+      })
+      return results
+    }
 
-    spyOn(websocketAction, 'requestToolCall').mockImplementation(
-      async (
-        ws: WebSocket,
-        userInputId: string,
-        toolName: string,
-        input: Record<string, any>,
-      ) => {
-        return {
-          output: [
-            {
-              type: 'json',
-              value: `Tool call success: ${{ toolName, input }}`,
-            },
-          ],
-        }
-      },
+    agentRuntimeScopedImpl.requestOptionalFile = async ({ filePath }) => {
+      if (filePath === 'test.txt') {
+        return 'mock content for test.txt'
+      }
+      return null
+    }
+
+    agentRuntimeScopedImpl.requestToolCall = mock(
+      async ({
+        toolName,
+        input,
+      }: ParamsOf<RequestToolCallFn>): ReturnType<RequestToolCallFn> => ({
+        output: [
+          {
+            type: 'json',
+            value: `Tool call success: ${{ toolName, input }}`,
+          },
+        ],
+      }),
     )
 
     spyOn(requestFilesPrompt, 'requestRelevantFiles').mockImplementation(
@@ -229,31 +222,29 @@ describe('mainPrompt', () => {
       toolResults: [],
     }
 
-    const { sessionState: newSessionState, output } = await mainPrompt(
-      new MockWebSocket() as unknown as WebSocket,
+    const { sessionState: newSessionState, output } = await mainPrompt({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
       action,
-      {
-        userId: TEST_USER_ID,
-        clientSessionId: 'test-session',
-        onResponseChunk: () => {},
-        localAgentTemplates: mockLocalAgentTemplates,
-      },
-    )
+      userId: TEST_USER_ID,
+      clientSessionId: 'test-session',
+      onResponseChunk: () => {},
+      localAgentTemplates: mockLocalAgentTemplates,
+    })
 
     // Verify that requestToolCall was called with the terminal command
-    const requestToolCallSpy = websocketAction.requestToolCall as any
+    const requestToolCallSpy = agentRuntimeScopedImpl.requestToolCall
     expect(requestToolCallSpy).toHaveBeenCalledTimes(1)
-    expect(requestToolCallSpy).toHaveBeenCalledWith(
-      expect.any(Object), // WebSocket
-      expect.any(String), // userInputId
-      'run_terminal_command',
-      expect.objectContaining({
+    expect(requestToolCallSpy).toHaveBeenCalledWith({
+      userInputId: expect.any(String), // userInputId
+      toolName: 'run_terminal_command',
+      input: expect.objectContaining({
         command: 'ls -la',
         mode: 'user',
         process_type: 'SYNC',
         timeout_seconds: -1,
       }),
-    )
+    })
 
     // Verify that the output contains the expected structure
     expect(output.type).toBeDefined()
@@ -278,7 +269,7 @@ describe('mainPrompt', () => {
     mockAgentStream(mockResponse)
 
     // Get reference to the spy so we can check if it was called
-    const requestToolCallSpy = websocketAction.requestToolCall as any
+    const requestToolCallSpy = agentRuntimeScopedImpl.requestToolCall
 
     const sessionState = getInitialSessionState(mockFileContext)
     const action = {
@@ -291,7 +282,10 @@ describe('mainPrompt', () => {
       toolResults: [],
     }
 
-    await mainPrompt(new MockWebSocket() as unknown as WebSocket, action, {
+    await mainPrompt({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
+      action,
       userId: TEST_USER_ID,
       clientSessionId: 'test-session',
       onResponseChunk: () => {},
@@ -335,16 +329,15 @@ describe('mainPrompt', () => {
     expect(requestToolCallSpy).toHaveBeenCalledTimes(1)
 
     // Verify the write_file call was made with the correct arguments
-    expect(requestToolCallSpy).toHaveBeenCalledWith(
-      expect.any(Object), // WebSocket
-      expect.any(String), // userInputId
-      'write_file',
-      expect.objectContaining({
+    expect(requestToolCallSpy).toHaveBeenCalledWith({
+      userInputId: expect.any(String), // userInputId
+      toolName: 'write_file',
+      input: expect.objectContaining({
         type: 'file',
         path: 'new-file.txt',
         content: 'Hello, world!',
       }),
-    )
+    })
   })
 
   it('should force end of response after MAX_CONSECUTIVE_ASSISTANT_MESSAGES', async () => {
@@ -367,16 +360,15 @@ describe('mainPrompt', () => {
       toolResults: [],
     }
 
-    const { output } = await mainPrompt(
-      new MockWebSocket() as unknown as WebSocket,
+    const { output } = await mainPrompt({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
       action,
-      {
-        userId: TEST_USER_ID,
-        clientSessionId: 'test-session',
-        onResponseChunk: () => {},
-        localAgentTemplates: mockLocalAgentTemplates,
-      },
-    )
+      userId: TEST_USER_ID,
+      clientSessionId: 'test-session',
+      onResponseChunk: () => {},
+      localAgentTemplates: mockLocalAgentTemplates,
+    })
 
     expect(output.type).toBeDefined() // Output should exist
   })
@@ -395,16 +387,15 @@ describe('mainPrompt', () => {
       toolResults: [],
     }
 
-    const { sessionState: newSessionState } = await mainPrompt(
-      new MockWebSocket() as unknown as WebSocket,
+    const { sessionState: newSessionState } = await mainPrompt({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
       action,
-      {
-        userId: TEST_USER_ID,
-        clientSessionId: 'test-session',
-        onResponseChunk: () => {},
-        localAgentTemplates: mockLocalAgentTemplates,
-      },
-    )
+      userId: TEST_USER_ID,
+      clientSessionId: 'test-session',
+      onResponseChunk: () => {},
+      localAgentTemplates: mockLocalAgentTemplates,
+    })
 
     // When there's a new prompt, consecutiveAssistantMessages should be set to 1
     expect(newSessionState.mainAgentState.stepsRemaining).toBe(
@@ -427,16 +418,15 @@ describe('mainPrompt', () => {
       toolResults: [],
     }
 
-    const { sessionState: newSessionState } = await mainPrompt(
-      new MockWebSocket() as unknown as WebSocket,
+    const { sessionState: newSessionState } = await mainPrompt({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
       action,
-      {
-        userId: TEST_USER_ID,
-        clientSessionId: 'test-session',
-        onResponseChunk: () => {},
-        localAgentTemplates: mockLocalAgentTemplates,
-      },
-    )
+      userId: TEST_USER_ID,
+      clientSessionId: 'test-session',
+      onResponseChunk: () => {},
+      localAgentTemplates: mockLocalAgentTemplates,
+    })
 
     // When there's no new prompt, consecutiveAssistantMessages should increment by 1
     expect(newSessionState.mainAgentState.stepsRemaining).toBe(initialCount - 1)
@@ -457,16 +447,15 @@ describe('mainPrompt', () => {
       toolResults: [],
     }
 
-    const { output } = await mainPrompt(
-      new MockWebSocket() as unknown as WebSocket,
+    const { output } = await mainPrompt({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
       action,
-      {
-        userId: TEST_USER_ID,
-        clientSessionId: 'test-session',
-        onResponseChunk: () => {},
-        localAgentTemplates: mockLocalAgentTemplates,
-      },
-    )
+      userId: TEST_USER_ID,
+      clientSessionId: 'test-session',
+      onResponseChunk: () => {},
+      localAgentTemplates: mockLocalAgentTemplates,
+    })
 
     expect(output.type).toBeDefined() // Output should exist even for empty response
   })
@@ -486,7 +475,7 @@ describe('mainPrompt', () => {
     mockAgentStream(mockResponse)
 
     // Get reference to the spy so we can check if it was called
-    const requestToolCallSpy = websocketAction.requestToolCall as any
+    const requestToolCallSpy = agentRuntimeScopedImpl.requestToolCall
 
     const action = {
       type: 'prompt' as const,
@@ -498,7 +487,10 @@ describe('mainPrompt', () => {
       toolResults: [],
     }
 
-    await mainPrompt(new MockWebSocket() as unknown as WebSocket, action, {
+    await mainPrompt({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
+      action,
       userId: TEST_USER_ID,
       clientSessionId: 'test-session',
       onResponseChunk: () => {},
@@ -509,15 +501,14 @@ describe('mainPrompt', () => {
     expect(requestToolCallSpy).toHaveBeenCalledTimes(1)
 
     // Verify the run_terminal_command call was made with the correct arguments
-    expect(requestToolCallSpy).toHaveBeenCalledWith(
-      expect.any(Object), // WebSocket
-      expect.any(String), // userInputId
-      'run_terminal_command',
-      expect.objectContaining({
+    expect(requestToolCallSpy).toHaveBeenCalledWith({
+      userInputId: expect.any(String), // userInputId
+      toolName: 'run_terminal_command',
+      input: expect.objectContaining({
         command: expectedCommand,
         process_type: 'SYNC',
         mode: 'assistant',
       }),
-    )
+    })
   })
 })

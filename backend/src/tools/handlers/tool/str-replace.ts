@@ -1,51 +1,49 @@
 import { getFileProcessingValues, postStreamProcessing } from './write-file'
 import { processStrReplace } from '../../../process-str-replace'
-import { logger } from '../../../util/logger'
-import { requestOptionalFile } from '../../../websockets/websocket-action'
 
-import type { CodebuffToolHandlerFunction } from '../handler-function-type'
 import type {
   FileProcessingState,
   OptionalFileProcessingState,
 } from './write-file'
+import type { CodebuffToolHandlerFunction } from '@codebuff/agent-runtime/tools/handlers/handler-function-type'
 import type {
   ClientToolCall,
   CodebuffToolCall,
   CodebuffToolOutput,
 } from '@codebuff/common/tools/list'
-import type { WebSocket } from 'ws'
+import type { RequestOptionalFileFn } from '@codebuff/common/types/contracts/client'
+import type { Logger } from '@codebuff/common/types/contracts/logger'
+import type { ParamsExcluding } from '@codebuff/common/types/function-params'
 
-export const handleStrReplace = ((params: {
-  previousToolCallFinished: Promise<void>
-  toolCall: CodebuffToolCall<'str_replace'>
-  requestClientToolCall: (
-    toolCall: ClientToolCall<'str_replace'>,
-  ) => Promise<CodebuffToolOutput<'str_replace'>>
-  writeToClient: (chunk: string) => void
+export function handleStrReplace(
+  params: {
+    previousToolCallFinished: Promise<void>
+    toolCall: CodebuffToolCall<'str_replace'>
+    requestClientToolCall: (
+      toolCall: ClientToolCall<'str_replace'>,
+    ) => Promise<CodebuffToolOutput<'str_replace'>>
+    writeToClient: (chunk: string) => void
+    logger: Logger
 
-  getLatestState: () => FileProcessingState
-  state: {
-    ws?: WebSocket
-  } & OptionalFileProcessingState
-}): {
+    getLatestState: () => FileProcessingState
+    state: OptionalFileProcessingState
+    requestOptionalFile: RequestOptionalFileFn
+  } & ParamsExcluding<RequestOptionalFileFn, 'filePath'>,
+): {
   result: Promise<CodebuffToolOutput<'str_replace'>>
   state: FileProcessingState
-} => {
+} {
   const {
     previousToolCallFinished,
     toolCall,
     requestClientToolCall,
     writeToClient,
+    logger,
     getLatestState,
+    requestOptionalFile,
     state,
   } = params
   const { path, replacements } = toolCall.input
-  const { ws } = state
-  if (ws === undefined) {
-    throw new Error(
-      'Internal error for str_replace: Missing WebSocket in state',
-    )
-  }
   const fileProcessingState = getFileProcessingValues(state)
 
   if (!fileProcessingState.promisesByPath[path]) {
@@ -59,14 +57,15 @@ export const handleStrReplace = ((params: {
     ? previousEdit.then((maybeResult) =>
         maybeResult && 'content' in maybeResult
           ? maybeResult.content
-          : requestOptionalFile({ ws, filePath: path }),
+          : requestOptionalFile({ ...params, filePath: path }),
       )
-    : requestOptionalFile({ ws, filePath: path })
+    : requestOptionalFile({ ...params, filePath: path })
 
   const newPromise = processStrReplace({
     path,
     replacements,
     initialContentPromise: latestContentPromise,
+    logger,
   })
     .catch((error: any) => {
       logger.error(error, 'Error processing str_replace block')
@@ -95,4 +94,5 @@ export const handleStrReplace = ((params: {
     }),
     state: fileProcessingState,
   }
-}) satisfies CodebuffToolHandlerFunction<'str_replace'>
+}
+handleStrReplace satisfies CodebuffToolHandlerFunction<'str_replace'>

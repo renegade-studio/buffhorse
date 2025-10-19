@@ -1,3 +1,4 @@
+import { countTokens } from '@codebuff/agent-runtime/util/token-counter'
 import { models } from '@codebuff/common/old-constants'
 import { cleanMarkdownCodeBlock } from '@codebuff/common/util/file'
 import { hasLazyEdit } from '@codebuff/common/util/string'
@@ -8,25 +9,38 @@ import {
   parseAndGetDiffBlocksSingleFile,
   retryDiffBlocksPrompt,
 } from './generate-diffs-prompt'
-import { promptAiSdk } from './llm-apis/vercel-ai-sdk/ai-sdk'
-import { logger } from './util/logger'
-import { countTokens } from './util/token-counter'
 
+import type { PromptAiSdkFn } from '@codebuff/common/types/contracts/llm'
+import type { Logger } from '@codebuff/common/types/contracts/logger'
+import type { ParamsExcluding } from '@codebuff/common/types/function-params'
 import type { Message } from '@codebuff/common/types/messages/codebuff-message'
 
-export async function processFileBlock(params: {
-  path: string
-  instructions: string | undefined
-  initialContentPromise: Promise<string | null>
-  newContent: string
-  messages: Message[]
-  fullResponse: string
-  lastUserPrompt: string | undefined
-  clientSessionId: string
-  fingerprintId: string
-  userInputId: string
-  userId: string | undefined
-}): Promise<
+export async function processFileBlock(
+  params: {
+    path: string
+    initialContentPromise: Promise<string | null>
+    newContent: string
+    messages: Message[]
+    fullResponse: string
+    lastUserPrompt: string | undefined
+    clientSessionId: string
+    fingerprintId: string
+    userInputId: string
+    userId: string | undefined
+    logger: Logger
+  } & ParamsExcluding<
+    typeof handleLargeFile,
+    'oldContent' | 'editSnippet' | 'filePath'
+  > &
+    ParamsExcluding<
+      typeof fastRewrite,
+      'initialContent' | 'editSnippet' | 'filePath' | 'userMessage'
+    > &
+    ParamsExcluding<
+      typeof shouldAddFilePlaceholders,
+      'filePath' | 'oldContent' | 'rewrittenNewContent' | 'messageHistory'
+    >,
+): Promise<
   | {
       tool: 'write_file'
       path: string
@@ -42,7 +56,6 @@ export async function processFileBlock(params: {
 > {
   const {
     path,
-    instructions,
     initialContentPromise,
     newContent,
     messages,
@@ -52,6 +65,7 @@ export async function processFileBlock(params: {
     fingerprintId,
     userInputId,
     userId,
+    logger,
   } = params
   const initialContent = await initialContentPromise
 
@@ -111,12 +125,9 @@ export async function processFileBlock(params: {
   )
   if (tokenCount > LARGE_FILE_TOKEN_LIMIT) {
     const largeFileContent = await handleLargeFile({
+      ...params,
       oldContent: normalizedInitialContent,
       editSnippet: normalizedEditSnippet,
-      clientSessionId,
-      fingerprintId,
-      userInputId,
-      userId,
       filePath: path,
     })
 
@@ -132,40 +143,28 @@ export async function processFileBlock(params: {
     updatedContent = largeFileContent
   } else {
     updatedContent = await fastRewrite({
+      ...params,
       initialContent: normalizedInitialContent,
       editSnippet: normalizedEditSnippet,
       filePath: path,
-      instructions,
-      clientSessionId,
-      fingerprintId,
-      userInputId,
-      userId,
       userMessage: lastUserPrompt,
     })
     const shouldAddPlaceholders = await shouldAddFilePlaceholders({
+      ...params,
       filePath: path,
       oldContent: normalizedInitialContent,
       rewrittenNewContent: updatedContent,
       messageHistory: messages,
-      fullResponse,
-      userId,
-      clientSessionId,
-      fingerprintId,
-      userInputId,
     })
 
     if (shouldAddPlaceholders) {
       const placeholderComment = `... existing code ...`
       const updatedEditSnippet = `${placeholderComment}\n${updatedContent}\n${placeholderComment}`
       updatedContent = await fastRewrite({
+        ...params,
         initialContent: normalizedInitialContent,
         editSnippet: updatedEditSnippet,
         filePath: path,
-        instructions,
-        clientSessionId,
-        fingerprintId,
-        userInputId,
-        userId,
         userMessage: lastUserPrompt,
       })
     }
@@ -224,24 +223,20 @@ export async function processFileBlock(params: {
 
 const LARGE_FILE_TOKEN_LIMIT = 64_000
 
-export async function handleLargeFile(params: {
-  oldContent: string
-  editSnippet: string
-  clientSessionId: string
-  fingerprintId: string
-  userInputId: string
-  userId: string | undefined
-  filePath: string
-}): Promise<string | null> {
-  const {
-    oldContent,
-    editSnippet,
-    clientSessionId,
-    fingerprintId,
-    userInputId,
-    userId,
-    filePath,
-  } = params
+export async function handleLargeFile(
+  params: {
+    oldContent: string
+    editSnippet: string
+    filePath: string
+    logger: Logger
+    promptAiSdk: PromptAiSdkFn
+  } & ParamsExcluding<
+    typeof retryDiffBlocksPrompt,
+    'oldContent' | 'diffBlocksThatDidntMatch'
+  > &
+    ParamsExcluding<PromptAiSdkFn, 'messages' | 'model'>,
+): Promise<string | null> {
+  const { oldContent, editSnippet, filePath, promptAiSdk, logger } = params
   const startTime = Date.now()
 
   // If the whole file is rewritten, we can just return the new content.
@@ -280,16 +275,17 @@ Please output just the SEARCH/REPLACE blocks like this:
 >>>>>>> REPLACE`
 
   const response = await promptAiSdk({
+    ...params,
     messages: [{ role: 'user', content: prompt }],
     model: models.o4mini,
-    clientSessionId,
-    fingerprintId,
-    userInputId,
-    userId,
   })
 
   const { diffBlocks, diffBlocksThatDidntMatch } =
-    parseAndGetDiffBlocksSingleFile(response, oldContent)
+    parseAndGetDiffBlocksSingleFile({
+      newContent: response,
+      oldFileContent: oldContent,
+      logger,
+    })
 
   let updatedContent = oldContent
   for (const { searchContent, replaceContent } of diffBlocks) {
@@ -312,12 +308,8 @@ Please output just the SEARCH/REPLACE blocks like this:
 
     const { newDiffBlocks, newDiffBlocksThatDidntMatch } =
       await retryDiffBlocksPrompt({
-        filePath,
+        ...params,
         oldContent: updatedContent,
-        clientSessionId,
-        fingerprintId,
-        userInputId,
-        userId,
         diffBlocksThatDidntMatch,
       })
 

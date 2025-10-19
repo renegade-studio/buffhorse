@@ -1,17 +1,17 @@
 import { partition } from 'lodash'
 
 import { processFileBlock } from '../../../process-file-block'
-import { logger } from '../../../util/logger'
-import { requestOptionalFile } from '../../../websockets/websocket-action'
 
-import type { CodebuffToolHandlerFunction } from '../handler-function-type'
+import type { CodebuffToolHandlerFunction } from '@codebuff/agent-runtime/tools/handlers/handler-function-type'
 import type {
   ClientToolCall,
   CodebuffToolCall,
   CodebuffToolOutput,
 } from '@codebuff/common/tools/list'
+import type { RequestOptionalFileFn } from '@codebuff/common/types/contracts/client'
+import type { Logger } from '@codebuff/common/types/contracts/logger'
+import type { ParamsExcluding } from '@codebuff/common/types/function-params'
 import type { Message } from '@codebuff/common/types/messages/codebuff-message'
-import type { WebSocket } from 'ws'
 
 type FileProcessingTools = 'write_file' | 'str_replace' | 'create_plan'
 export type FileProcessing<
@@ -62,48 +62,63 @@ export function getFileProcessingValues(
   return fileProcessingValues
 }
 
-export const handleWriteFile = (({
-  previousToolCallFinished,
-  toolCall,
+export function handleWriteFile(
+  params: {
+    previousToolCallFinished: Promise<void>
+    toolCall: CodebuffToolCall<'write_file'>
 
-  clientSessionId,
-  userInputId,
+    clientSessionId: string
+    userInputId: string
 
-  requestClientToolCall,
-  writeToClient,
+    requestClientToolCall: (
+      toolCall: ClientToolCall<'write_file'>,
+    ) => Promise<CodebuffToolOutput<'write_file'>>
+    writeToClient: (chunk: string) => void
 
-  getLatestState,
-  state,
-}: {
-  previousToolCallFinished: Promise<void>
-  toolCall: CodebuffToolCall<'write_file'>
-
-  clientSessionId: string
-  userInputId: string
-
-  requestClientToolCall: (
-    toolCall: ClientToolCall<'write_file'>,
-  ) => Promise<CodebuffToolOutput<'write_file'>>
-  writeToClient: (chunk: string) => void
-
-  getLatestState: () => FileProcessingState
-  state: {
-    ws?: WebSocket
-    fingerprintId?: string
-    userId?: string
-    fullResponse?: string
-    prompt?: string
-    messages?: Message[]
-  } & OptionalFileProcessingState
-}): {
+    getLatestState: () => FileProcessingState
+    state: {
+      fingerprintId?: string
+      userId?: string
+      fullResponse?: string
+      prompt?: string
+      messages?: Message[]
+    } & OptionalFileProcessingState
+    requestOptionalFile: RequestOptionalFileFn
+    logger: Logger
+  } & ParamsExcluding<
+    typeof processFileBlock,
+    | 'path'
+    | 'instructions'
+    | 'fingerprintId'
+    | 'userId'
+    | 'initialContentPromise'
+    | 'newContent'
+    | 'messages'
+    | 'fullResponse'
+    | 'lastUserPrompt'
+  > &
+    ParamsExcluding<RequestOptionalFileFn, 'filePath'>,
+): {
   result: Promise<CodebuffToolOutput<'write_file'>>
   state: FileProcessingState
-} => {
+} {
+  const {
+    previousToolCallFinished,
+    toolCall,
+
+    clientSessionId,
+    userInputId,
+
+    requestClientToolCall,
+    writeToClient,
+
+    getLatestState,
+    state,
+    requestOptionalFile,
+    logger,
+  } = params
   const { path, instructions, content } = toolCall.input
-  const { ws, fingerprintId, userId, fullResponse, prompt } = state
-  if (!ws) {
-    throw new Error('Internal error for write_file: Missing WebSocket in state')
-  }
+  const { fingerprintId, userId, fullResponse, prompt } = state
   if (!fingerprintId) {
     throw new Error(
       'Internal error for write_file: Missing fingerprintId in state',
@@ -129,9 +144,9 @@ export const handleWriteFile = (({
     ? previousEdit.then((maybeResult) =>
         maybeResult && 'content' in maybeResult
           ? maybeResult.content
-          : requestOptionalFile({ ws, filePath: path }),
+          : requestOptionalFile({ ...params, filePath: path }),
       )
-    : requestOptionalFile({ ws, filePath: path })
+    : requestOptionalFile({ ...params, filePath: path })
 
   const fileContentWithoutStartNewline = content.startsWith('\n')
     ? content.slice(1)
@@ -140,6 +155,7 @@ export const handleWriteFile = (({
   logger.debug({ path, content }, `write_file ${path}`)
 
   const newPromise = processFileBlock({
+    ...params,
     path,
     instructions,
     initialContentPromise: latestContentPromise,
@@ -151,6 +167,7 @@ export const handleWriteFile = (({
     fingerprintId,
     userInputId,
     userId,
+    logger,
   })
     .catch((error) => {
       logger.error(error, 'Error processing write_file block')
@@ -179,7 +196,8 @@ export const handleWriteFile = (({
     })(),
     state: fileProcessingState,
   }
-}) satisfies CodebuffToolHandlerFunction<'write_file'>
+}
+handleWriteFile satisfies CodebuffToolHandlerFunction<'write_file'>
 
 export async function postStreamProcessing<T extends FileProcessingTools>(
   toolCall: FileProcessing<T>,

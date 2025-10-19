@@ -1,3 +1,14 @@
+import { getMCPToolData } from '@codebuff/agent-runtime/mcp'
+import { getAgentStreamFromTemplate } from '@codebuff/agent-runtime/prompt-agent-stream'
+import { getAgentTemplate } from '@codebuff/agent-runtime/templates/agent-registry'
+import {
+  asSystemInstruction,
+  asSystemMessage,
+  buildUserMessageContent,
+  messagesWithSystem,
+  expireMessages,
+} from '@codebuff/agent-runtime/util/messages'
+import { countTokensJson } from '@codebuff/agent-runtime/util/token-counter'
 import { insertTrace } from '@codebuff/bigquery'
 import { trackEvent } from '@codebuff/common/analytics'
 import { AnalyticsEvent } from '@codebuff/common/constants/analytics-events'
@@ -7,32 +18,25 @@ import { buildArray } from '@codebuff/common/util/array'
 import { getErrorObject } from '@codebuff/common/util/error'
 import { cloneDeep } from 'lodash'
 
-import { addAgentStep, finishAgentRun, startAgentRun } from './agent-run'
 import { checkLiveUserInput } from './live-user-inputs'
-import { getMCPToolData } from './mcp/util'
-import { getAgentStreamFromTemplate } from './prompt-agent-stream'
 import { runProgrammaticStep } from './run-programmatic-step'
 import { additionalSystemPrompts } from './system-prompt/prompts'
-import { getAgentTemplate } from './templates/agent-registry'
 import { getAgentPrompt } from './templates/strings'
 import { processStreamWithTools } from './tools/stream-parser'
-import { logger } from './util/logger'
-import {
-  asSystemInstruction,
-  asSystemMessage,
-  asUserMessage,
-  messagesWithSystem,
-  expireMessages,
-} from './util/messages'
-import { countTokensJson } from './util/token-counter'
+import { getAgentOutput } from './util/agent-output'
 import { getRequestContext } from './websockets/request-context'
 
 import type { AgentResponseTrace } from '@codebuff/bigquery'
 import type { AgentTemplate } from '@codebuff/common/types/agent-template'
+import type { SendActionFn } from '@codebuff/common/types/contracts/client'
 import type {
-  AssistantMessage,
-  Message,
-} from '@codebuff/common/types/messages/codebuff-message'
+  AddAgentStepFn,
+  FinishAgentRunFn,
+  StartAgentRunFn,
+} from '@codebuff/common/types/contracts/database'
+import type { Logger } from '@codebuff/common/types/contracts/logger'
+import type { ParamsExcluding } from '@codebuff/common/types/function-params'
+import type { Message } from '@codebuff/common/types/messages/codebuff-message'
 import type {
   ToolResultPart,
   TextPart,
@@ -45,52 +49,52 @@ import type {
   AgentOutput,
 } from '@codebuff/common/types/session-state'
 import type { ProjectFileContext } from '@codebuff/common/util/file'
-import type { WebSocket } from 'ws'
-
-/**
- * Combines prompt, params, and content into a unified message content structure
- */
-function buildUserMessageContent(
-  prompt: string | undefined,
-  params: Record<string, any> | undefined,
-  content?: Array<TextPart | ImagePart>,
-): string | Array<TextPart | ImagePart> {
-  // If we have content, return it as-is (client should have already combined prompt + content)
-  if (content && content.length > 0) {
-    if (content.length === 1 && content[0].type === 'text') {
-      return asUserMessage(content[0].text)
-    }
-    return content
-  }
-
-  // Only prompt/params, combine and return as simple text
-  const textParts = buildArray([
-    prompt,
-    params && JSON.stringify(params, null, 2),
-  ])
-  return asUserMessage(textParts.join('\n\n'))
-}
-
-export interface AgentOptions {
-  userId: string | undefined
-  userInputId: string
-  clientSessionId: string
-  fingerprintId: string
-  onResponseChunk: (chunk: string | PrintModeEvent) => void
-
-  agentType: AgentTemplateType
-  fileContext: ProjectFileContext
-  agentState: AgentState
-  localAgentTemplates: Record<string, AgentTemplate>
-
-  prompt: string | undefined
-  params: Record<string, any> | undefined
-  system: string
-}
 
 export const runAgentStep = async (
-  ws: WebSocket,
-  options: AgentOptions,
+  params: {
+    userId: string | undefined
+    userInputId: string
+    clientSessionId: string
+    fingerprintId: string
+    onResponseChunk: (chunk: string | PrintModeEvent) => void
+    sendAction: SendActionFn
+
+    agentType: AgentTemplateType
+    fileContext: ProjectFileContext
+    agentState: AgentState
+    localAgentTemplates: Record<string, AgentTemplate>
+
+    prompt: string | undefined
+    spawnParams: Record<string, any> | undefined
+    system: string
+  } & ParamsExcluding<
+    typeof processStreamWithTools,
+    | 'stream'
+    | 'agentStepId'
+    | 'agentState'
+    | 'repoId'
+    | 'messages'
+    | 'agentTemplate'
+    | 'agentContext'
+    | 'fullResponse'
+  > &
+    ParamsExcluding<
+      typeof getAgentStreamFromTemplate,
+      'agentId' | 'template' | 'onCostCalculated' | 'includeCacheControl'
+    > &
+    ParamsExcluding<typeof getAgentTemplate, 'agentId'> &
+    ParamsExcluding<
+      typeof getAgentPrompt,
+      | 'agentTemplate'
+      | 'promptType'
+      | 'agentState'
+      | 'agentTemplates'
+      | 'additionalToolDefinitions'
+    > &
+    ParamsExcluding<
+      typeof getMCPToolData,
+      'toolNames' | 'mcpServers' | 'writeTo'
+    >,
 ): Promise<{
   agentState: AgentState
   fullResponse: string
@@ -103,14 +107,17 @@ export const runAgentStep = async (
     fingerprintId,
     clientSessionId,
     onResponseChunk,
+    sendAction,
     fileContext,
     agentType,
     localAgentTemplates,
     prompt,
-    params,
+    spawnParams,
     system,
-  } = options
-  let agentState = options.agentState
+    logger,
+    promptAiSdkStream,
+  } = params
+  let agentState = params.agentState
 
   const { agentContext } = agentState
 
@@ -170,7 +177,10 @@ export const runAgentStep = async (
     }
   }
 
-  const agentTemplate = await getAgentTemplate(agentType, localAgentTemplates)
+  const agentTemplate = await getAgentTemplate({
+    ...params,
+    agentId: agentType,
+  })
   if (!agentTemplate) {
     throw new Error(
       `Agent template not found for type: ${agentType}. Available types: ${Object.keys(localAgentTemplates).join(', ')}`,
@@ -178,11 +188,13 @@ export const runAgentStep = async (
   }
 
   const stepPrompt = await getAgentPrompt({
+    ...params,
     agentTemplate,
     promptType: { type: 'stepPrompt' },
     fileContext,
     agentState,
     agentTemplates: localAgentTemplates,
+    logger,
     additionalToolDefinitions: () => {
       const additionalToolDefinitions = cloneDeep(
         Object.fromEntries(
@@ -192,7 +204,7 @@ export const runAgentStep = async (
         ),
       )
       return getMCPToolData({
-        ws,
+        ...params,
         toolNames: agentTemplate.toolNames,
         mcpServers: agentTemplate.mcpServers,
         writeTo: additionalToolDefinitions,
@@ -230,7 +242,7 @@ export const runAgentStep = async (
     fingerprintId,
     userInputId,
     userId,
-    agentId: agentState.agentId,
+    agentId: agentState.parentId ? agentState.agentId : undefined,
     template: agentTemplate,
     onCostCalculated: async (credits: number) => {
       try {
@@ -249,6 +261,9 @@ export const runAgentStep = async (
         )
       }
     },
+    sendAction,
+    promptAiSdkStream,
+    logger,
     includeCacheControl: supportsCacheControl(agentTemplate.model),
   })
 
@@ -266,7 +281,7 @@ export const runAgentStep = async (
       agentMessages: agentState.messageHistory,
       system,
       prompt,
-      params,
+      params: spawnParams,
       agentContext,
       systemTokens,
       agentTemplate,
@@ -288,22 +303,14 @@ export const runAgentStep = async (
     fullResponse: fullResponseAfterStream,
     fullResponseChunks,
   } = await processStreamWithTools({
+    ...params,
     stream,
-    ws,
     agentStepId,
-    clientSessionId,
-    fingerprintId,
-    userInputId,
-    userId,
     agentState,
     repoId,
     messages: agentMessages,
-    system,
     agentTemplate,
-    localAgentTemplates,
-    fileContext,
     agentContext,
-    onResponseChunk,
     fullResponse,
   })
   toolResults.push(...newToolResults)
@@ -394,30 +401,14 @@ export const runAgentStep = async (
   }
 }
 
-export const loopAgentSteps = async (
-  ws: WebSocket,
-  {
-    userInputId,
-    agentType,
-    agentState,
-    prompt,
-    content,
-    params,
-    fingerprintId,
-    fileContext,
-    localAgentTemplates,
-    userId,
-    clientSessionId,
-    onResponseChunk,
-    clearUserPromptMessagesAfterResponse = true,
-    parentSystemPrompt,
-  }: {
+export async function loopAgentSteps(
+  params: {
     userInputId: string
     agentType: AgentTemplateType
     agentState: AgentState
     prompt: string | undefined
     content?: Array<TextPart | ImagePart>
-    params: Record<string, any> | undefined
+    spawnParams: Record<string, any> | undefined
     fingerprintId: string
     fileContext: ProjectFileContext
     localAgentTemplates: Record<string, AgentTemplate>
@@ -427,12 +418,62 @@ export const loopAgentSteps = async (
     userId: string | undefined
     clientSessionId: string
     onResponseChunk: (chunk: string | PrintModeEvent) => void
-  },
+
+    startAgentRun: StartAgentRunFn
+    finishAgentRun: FinishAgentRunFn
+    addAgentStep: AddAgentStepFn
+    logger: Logger
+  } & ParamsExcluding<
+    typeof runProgrammaticStep,
+    | 'agentState'
+    | 'template'
+    | 'prompt'
+    | 'toolCallParams'
+    | 'stepsComplete'
+    | 'stepNumber'
+    | 'system'
+  > &
+    ParamsExcluding<typeof getAgentTemplate, 'agentId'> &
+    ParamsExcluding<
+      typeof getAgentPrompt,
+      | 'agentTemplate'
+      | 'promptType'
+      | 'agentTemplates'
+      | 'additionalToolDefinitions'
+    > &
+    ParamsExcluding<
+      typeof getMCPToolData,
+      'toolNames' | 'mcpServers' | 'writeTo'
+    >,
 ): Promise<{
   agentState: AgentState
   output: AgentOutput
-}> => {
-  const agentTemplate = await getAgentTemplate(agentType, localAgentTemplates)
+}> {
+  const {
+    userInputId,
+    agentType,
+    agentState,
+    prompt,
+    content,
+    spawnParams,
+    fingerprintId,
+    fileContext,
+    localAgentTemplates,
+    userId,
+    clientSessionId,
+    onResponseChunk,
+    clearUserPromptMessagesAfterResponse = true,
+    parentSystemPrompt,
+    startAgentRun,
+    finishAgentRun,
+    addAgentStep,
+    logger,
+  } = params
+
+  const agentTemplate = await getAgentTemplate({
+    ...params,
+    agentId: agentType,
+  })
   if (!agentTemplate) {
     throw new Error(`Agent template not found for type: ${agentType}`)
   }
@@ -448,35 +489,27 @@ export const loopAgentSteps = async (
   })
 
   // Initialize message history with user prompt and instructions on first iteration
-  const hasPrompt = Boolean(
-    prompt || (params && Object.keys(params).length > 0),
-  )
-
-  // Get the instructions prompt if we have a prompt/params
-  const instructionsPrompt = hasPrompt
-    ? await getAgentPrompt({
-        agentTemplate,
-        promptType: { type: 'instructionsPrompt' },
-        fileContext,
-        agentState,
-        agentTemplates: localAgentTemplates,
-        additionalToolDefinitions: () => {
-          const additionalToolDefinitions = cloneDeep(
-            Object.fromEntries(
-              Object.entries(fileContext.customToolDefinitions).filter(
-                ([toolName]) => agentTemplate.toolNames.includes(toolName),
-              ),
-            ),
-          )
-          return getMCPToolData({
-            ws,
-            toolNames: agentTemplate.toolNames,
-            mcpServers: agentTemplate.mcpServers,
-            writeTo: additionalToolDefinitions,
-          })
-        },
+  const instructionsPrompt = await getAgentPrompt({
+    ...params,
+    agentTemplate,
+    promptType: { type: 'instructionsPrompt' },
+    agentTemplates: localAgentTemplates,
+    additionalToolDefinitions: () => {
+      const additionalToolDefinitions = cloneDeep(
+        Object.fromEntries(
+          Object.entries(fileContext.customToolDefinitions).filter(
+            ([toolName]) => agentTemplate.toolNames.includes(toolName),
+          ),
+        ),
+      )
+      return getMCPToolData({
+        ...params,
+        toolNames: agentTemplate.toolNames,
+        mcpServers: agentTemplate.mcpServers,
+        writeTo: additionalToolDefinitions,
       })
-    : undefined
+    },
+  })
 
   // Build the initial message history with user prompt and instructions
   // Generate system prompt once, using parent's if inheritParentSystemPrompt is true
@@ -484,10 +517,9 @@ export const loopAgentSteps = async (
     agentTemplate.inheritParentSystemPrompt && parentSystemPrompt
       ? parentSystemPrompt
       : (await getAgentPrompt({
+          ...params,
           agentTemplate,
           promptType: { type: 'systemPrompt' },
-          fileContext,
-          agentState,
           agentTemplates: localAgentTemplates,
           additionalToolDefinitions: () => {
             const additionalToolDefinitions = cloneDeep(
@@ -498,7 +530,7 @@ export const loopAgentSteps = async (
               ),
             )
             return getMCPToolData({
-              ws,
+              ...params,
               toolNames: agentTemplate.toolNames,
               mcpServers: agentTemplate.mcpServers,
               writeTo: additionalToolDefinitions,
@@ -506,14 +538,18 @@ export const loopAgentSteps = async (
           },
         })) ?? ''
 
+  const hasUserMessage = Boolean(
+    prompt || (spawnParams && Object.keys(spawnParams).length > 0),
+  )
+
   const initialMessages = buildArray<Message>(
     ...agentState.messageHistory,
 
-    hasPrompt && [
+    hasUserMessage && [
       {
-        // Actual user prompt!
+        // Actual user message!
         role: 'user' as const,
-        content: buildUserMessageContent(prompt, params, content),
+        content: buildUserMessageContent(prompt, spawnParams, content),
         keepDuringTruncation: true,
       },
       prompt &&
@@ -541,13 +577,13 @@ export const loopAgentSteps = async (
   let shouldEndTurn = false
   let hasRetriedOutputSchema = false
   let currentPrompt = prompt
-  let currentParams = params
+  let currentParams = spawnParams
   let totalSteps = 0
 
   try {
     while (true) {
       totalSteps++
-      if (!checkLiveUserInput(userId, userInputId, clientSessionId)) {
+      if (!checkLiveUserInput({ userId, userInputId, clientSessionId })) {
         logger.warn(
           {
             userId,
@@ -570,18 +606,13 @@ export const loopAgentSteps = async (
           agentState: programmaticAgentState,
           endTurn,
           stepNumber,
-        } = await runProgrammaticStep(currentAgentState, {
-          userId,
-          userInputId,
-          clientSessionId,
-          fingerprintId,
-          onResponseChunk,
-          fileContext,
-          ws,
+        } = await runProgrammaticStep({
+          ...params,
+          agentState: currentAgentState,
           template: agentTemplate,
           localAgentTemplates,
           prompt: currentPrompt,
-          params: currentParams,
+          toolCallParams: currentParams,
           system,
           stepsComplete: shouldEndTurn,
           stepNumber: totalSteps,
@@ -589,9 +620,7 @@ export const loopAgentSteps = async (
         currentAgentState = programmaticAgentState
         totalSteps = stepNumber
 
-        if (endTurn) {
-          shouldEndTurn = true
-        }
+        shouldEndTurn = endTurn
       }
 
       // Check if output is required but missing
@@ -640,7 +669,8 @@ export const loopAgentSteps = async (
         agentState: newAgentState,
         shouldEndTurn: llmShouldEndTurn,
         messageId,
-      } = await runAgentStep(ws, {
+      } = await runAgentStep({
+        ...params,
         userId,
         userInputId,
         clientSessionId,
@@ -651,7 +681,7 @@ export const loopAgentSteps = async (
         fileContext,
         agentState: currentAgentState,
         prompt: currentPrompt,
-        params: currentParams,
+        spawnParams: currentParams,
         system,
       })
 
@@ -685,7 +715,7 @@ export const loopAgentSteps = async (
       )
     }
 
-    const status = checkLiveUserInput(userId, userInputId, clientSessionId)
+    const status = checkLiveUserInput({ userId, userInputId, clientSessionId })
       ? 'completed'
       : 'cancelled'
     await finishAgentRun({
@@ -717,7 +747,7 @@ export const loopAgentSteps = async (
     )
     const errorMessage = typeof error === 'string' ? error : `${error}`
 
-    const status = checkLiveUserInput(userId, userInputId, clientSessionId)
+    const status = checkLiveUserInput({ userId, userInputId, clientSessionId })
       ? 'failed'
       : 'cancelled'
     await finishAgentRun({
@@ -740,44 +770,4 @@ export const loopAgentSteps = async (
       },
     }
   }
-}
-
-function getAgentOutput(
-  agentState: AgentState,
-  agentTemplate: AgentTemplate,
-): AgentOutput {
-  if (agentTemplate.outputMode === 'structured_output') {
-    return {
-      type: 'structuredOutput',
-      value: agentState.output ?? null,
-    }
-  }
-  if (agentTemplate.outputMode === 'last_message') {
-    const assistantMessages = agentState.messageHistory.filter(
-      (message): message is AssistantMessage => message.role === 'assistant',
-    )
-    const lastAssistantMessage = assistantMessages[assistantMessages.length - 1]
-    if (!lastAssistantMessage) {
-      return {
-        type: 'error',
-        message: 'No response from agent',
-      }
-    }
-    return {
-      type: 'lastMessage',
-      value: lastAssistantMessage.content,
-    }
-  }
-  if (agentTemplate.outputMode === 'all_messages') {
-    // Remove the first message, which includes the previous conversation history.
-    const agentMessages = agentState.messageHistory.slice(1)
-    return {
-      type: 'allMessages',
-      value: agentMessages,
-    }
-  }
-  agentTemplate.outputMode satisfies never
-  throw new Error(
-    `Unknown output mode: ${'outputMode' in agentTemplate ? agentTemplate.outputMode : 'undefined'}`,
-  )
 }

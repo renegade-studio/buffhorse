@@ -1,4 +1,8 @@
 import { TEST_USER_ID } from '@codebuff/common/old-constants'
+import {
+  TEST_AGENT_RUNTIME_IMPL,
+  TEST_AGENT_RUNTIME_SCOPED_IMPL,
+} from '@codebuff/common/testing/impl/agent-runtime'
 import { getInitialSessionState } from '@codebuff/common/types/session-state'
 import {
   describe,
@@ -10,15 +14,13 @@ import {
   spyOn,
 } from 'bun:test'
 
-import { mockFileContext, MockWebSocket } from './test-utils'
+import { mockFileContext } from './test-utils'
 import * as runAgentStep from '../run-agent-step'
 import { handleSpawnAgents } from '../tools/handlers/tool/spawn-agents'
-import * as loggerModule from '../util/logger'
 
 import type { CodebuffToolCall } from '@codebuff/common/tools/list'
 import type { AgentTemplate } from '@codebuff/common/types/agent-template'
 import type { Message } from '@codebuff/common/types/messages/codebuff-message'
-import type { WebSocket } from 'ws'
 
 describe('Spawn Agents Message History', () => {
   let mockSendSubagentChunk: any
@@ -26,15 +28,6 @@ describe('Spawn Agents Message History', () => {
   let capturedSubAgentState: any
 
   beforeEach(() => {
-    // Mock logger to reduce noise in tests
-    spyOn(loggerModule.logger, 'debug').mockImplementation(() => {})
-    spyOn(loggerModule.logger, 'error').mockImplementation(() => {})
-    spyOn(loggerModule.logger, 'info').mockImplementation(() => {})
-    spyOn(loggerModule.logger, 'warn').mockImplementation(() => {})
-    spyOn(loggerModule, 'withLoggerContext').mockImplementation(
-      async (context: any, fn: () => Promise<any>) => fn(),
-    )
-
     // Mock sendSubagentChunk
     mockSendSubagentChunk = mock(() => {})
 
@@ -42,7 +35,7 @@ describe('Spawn Agents Message History', () => {
     mockLoopAgentSteps = spyOn(
       runAgentStep,
       'loopAgentSteps',
-    ).mockImplementation(async (ws, options) => {
+    ).mockImplementation(async (options) => {
       capturedSubAgentState = options.agentState
       return {
         agentState: {
@@ -100,7 +93,6 @@ describe('Spawn Agents Message History', () => {
   it('should include all messages from conversation history when includeMessageHistory is true', async () => {
     const parentAgent = createMockAgent('parent', true)
     const childAgent = createMockAgent('child-agent', true)
-    const ws = new MockWebSocket() as unknown as WebSocket
     const sessionState = getInitialSessionState(mockFileContext)
     const toolCall = createSpawnToolCall('child-agent')
 
@@ -116,6 +108,8 @@ describe('Spawn Agents Message History', () => {
     ]
 
     const { result } = handleSpawnAgents({
+      ...TEST_AGENT_RUNTIME_IMPL,
+      ...TEST_AGENT_RUNTIME_SCOPED_IMPL,
       previousToolCallFinished: Promise.resolve(),
       toolCall,
       fileContext: mockFileContext,
@@ -124,7 +118,6 @@ describe('Spawn Agents Message History', () => {
       writeToClient: () => {},
       getLatestState: () => ({ messages: mockMessages }),
       state: {
-        ws,
         fingerprintId: 'test-fingerprint',
         userId: TEST_USER_ID,
         agentTemplate: parentAgent,
@@ -176,7 +169,6 @@ describe('Spawn Agents Message History', () => {
   it('should not include conversation history when includeMessageHistory is false', async () => {
     const parentAgent = createMockAgent('parent', true)
     const childAgent = createMockAgent('child-agent', false) // includeMessageHistory = false
-    const ws = new MockWebSocket() as unknown as WebSocket
     const sessionState = getInitialSessionState(mockFileContext)
     const toolCall = createSpawnToolCall('child-agent')
 
@@ -187,6 +179,8 @@ describe('Spawn Agents Message History', () => {
     ]
 
     const { result } = handleSpawnAgents({
+      ...TEST_AGENT_RUNTIME_IMPL,
+      ...TEST_AGENT_RUNTIME_SCOPED_IMPL,
       previousToolCallFinished: Promise.resolve(),
       toolCall,
       fileContext: mockFileContext,
@@ -195,7 +189,6 @@ describe('Spawn Agents Message History', () => {
       writeToClient: () => {},
       getLatestState: () => ({ messages: mockMessages }),
       state: {
-        ws,
         fingerprintId: 'test-fingerprint',
         userId: TEST_USER_ID,
         agentTemplate: parentAgent,
@@ -216,13 +209,14 @@ describe('Spawn Agents Message History', () => {
   it('should handle empty message history gracefully', async () => {
     const parentAgent = createMockAgent('parent', true)
     const childAgent = createMockAgent('child-agent', true)
-    const ws = new MockWebSocket() as unknown as WebSocket
     const sessionState = getInitialSessionState(mockFileContext)
     const toolCall = createSpawnToolCall('child-agent')
 
     const mockMessages: Message[] = [] // Empty message history
 
     const { result } = handleSpawnAgents({
+      ...TEST_AGENT_RUNTIME_IMPL,
+      ...TEST_AGENT_RUNTIME_SCOPED_IMPL,
       previousToolCallFinished: Promise.resolve(),
       toolCall,
       fileContext: mockFileContext,
@@ -231,7 +225,6 @@ describe('Spawn Agents Message History', () => {
       writeToClient: () => {},
       getLatestState: () => ({ messages: mockMessages }),
       state: {
-        ws,
         fingerprintId: 'test-fingerprint',
         userId: TEST_USER_ID,
         agentTemplate: parentAgent,
@@ -252,7 +245,6 @@ describe('Spawn Agents Message History', () => {
   it('should handle message history with only system messages', async () => {
     const parentAgent = createMockAgent('parent', true)
     const childAgent = createMockAgent('child-agent', true)
-    const ws = new MockWebSocket() as unknown as WebSocket
     const sessionState = getInitialSessionState(mockFileContext)
     const toolCall = createSpawnToolCall('child-agent')
 
@@ -262,6 +254,8 @@ describe('Spawn Agents Message History', () => {
     ]
 
     const { result } = handleSpawnAgents({
+      ...TEST_AGENT_RUNTIME_IMPL,
+      ...TEST_AGENT_RUNTIME_SCOPED_IMPL,
       previousToolCallFinished: Promise.resolve(),
       toolCall,
       fileContext: mockFileContext,
@@ -270,7 +264,6 @@ describe('Spawn Agents Message History', () => {
       writeToClient: () => {},
       getLatestState: () => ({ messages: mockMessages }),
       state: {
-        ws,
         fingerprintId: 'test-fingerprint',
         userId: TEST_USER_ID,
         agentTemplate: parentAgent,

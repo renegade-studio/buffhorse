@@ -1,15 +1,16 @@
 import * as os from 'os'
-import * as fs from 'fs'
+import path from 'path'
 
 import { getFileTokenScores } from '@codebuff/code-map/parse'
+import { cloneDeep } from 'lodash'
+
 import {
   getProjectFileTree,
   getAllFilePaths,
 } from '../../common/src/project-file-tree'
-
-import { type CustomToolDefinition } from './custom-tool'
 import { getInitialSessionState } from '../../common/src/types/session-state'
 
+import type { CustomToolDefinition } from './custom-tool'
 import type { AgentDefinition } from '../../common/src/templates/initial-agents-dir/types/agent-definition'
 import type { Message } from '../../common/src/types/messages/codebuff-message'
 import type {
@@ -20,12 +21,22 @@ import type {
   CustomToolDefinitions,
   FileTreeNode,
 } from '../../common/src/util/file'
-import path from 'path'
+import type { CodebuffFileSystem } from '@codebuff/common/types/filesystem'
 
 export type RunState = {
   sessionState: SessionState
   output: AgentOutput
 }
+
+export type InitialSessionStateOptions = {
+  cwd?: string
+  projectFiles?: Record<string, string>
+  knowledgeFiles?: Record<string, string>
+  agentDefinitions?: AgentDefinition[]
+  customToolDefinitions?: CustomToolDefinition[]
+  maxAgentSteps?: number
+  fs?: CodebuffFileSystem
+};
 
 /**
  * Processes agent definitions array and converts handleSteps functions to strings
@@ -108,8 +119,13 @@ async function computeProjectIndex(
 /**
  * Discovers project files using .gitignore patterns when projectFiles is undefined
  */
-function discoverProjectFiles(cwd: string): Record<string, string> {
-  const fileTree = getProjectFileTree(cwd)
+function discoverProjectFiles(params: {
+  cwd: string
+  fs: CodebuffFileSystem
+}): Record<string, string> {
+  const { cwd, fs } = params
+
+  const fileTree = getProjectFileTree({ projectRoot: cwd, fs })
   const filePaths = getAllFilePaths(fileTree)
   let error
 
@@ -149,22 +165,36 @@ function deriveKnowledgeFiles(
   return knowledgeFiles
 }
 
+export function initialSessionState(
+  options: InitialSessionStateOptions,
+): Promise<SessionState>;
+export function initialSessionState(
+  cwd: string,
+  options?: Omit<InitialSessionStateOptions, 'cwd'>,
+): Promise<SessionState>;
 export async function initialSessionState(
-  cwd: string | undefined,
-  options: {
-    projectFiles?: Record<string, string>
-    knowledgeFiles?: Record<string, string>
-    agentDefinitions?: AgentDefinition[]
-    customToolDefinitions?: CustomToolDefinition[]
-    maxAgentSteps?: number
-  },
-) {
-  let { projectFiles, agentDefinitions = [] } = options
-  let { knowledgeFiles } = options
+  arg1: string | InitialSessionStateOptions,
+  arg2?: Omit<InitialSessionStateOptions, 'cwd'>,
+): Promise<SessionState> {
+  const options: InitialSessionStateOptions =
+    typeof arg1 === 'string' ? { ...(arg2 ?? {}), cwd: arg1 } : arg1 ?? {}
+
+  const cwd = options.cwd
+  const agentDefinitions = options.agentDefinitions ?? []
+  const customToolDefinitions = options.customToolDefinitions ?? []
+  const maxAgentSteps = options.maxAgentSteps
+
+  let projectFiles = options.projectFiles
+  let knowledgeFiles = options.knowledgeFiles
+  let fs: CodebuffFileSystem | undefined = options.fs
+
+  if (!fs) {
+    fs = (await import('fs')) as unknown as CodebuffFileSystem
+  }
 
   // Auto-discover project files if not provided and cwd is available
   if (projectFiles === undefined && cwd) {
-    projectFiles = discoverProjectFiles(cwd)
+    projectFiles = discoverProjectFiles({ cwd, fs })
   }
   if (knowledgeFiles === undefined) {
     knowledgeFiles = projectFiles ? deriveKnowledgeFiles(projectFiles) : {}
@@ -172,7 +202,7 @@ export async function initialSessionState(
 
   const processedAgentTemplates = processAgentDefinitions(agentDefinitions)
   const processedCustomToolDefinitions = processCustomToolDefinitions(
-    options.customToolDefinitions ?? [],
+    customToolDefinitions,
   )
 
   // Generate file tree and token scores from projectFiles if available
@@ -215,8 +245,8 @@ export async function initialSessionState(
     },
   })
 
-  if (options.maxAgentSteps) {
-    initialState.mainAgentState.stepsRemaining = options.maxAgentSteps
+  if (maxAgentSteps) {
+    initialState.mainAgentState.stepsRemaining = maxAgentSteps
   }
 
   return initialState
@@ -229,6 +259,7 @@ export async function generateInitialRunState({
   agentDefinitions,
   customToolDefinitions,
   maxAgentSteps,
+  fs,
 }: {
   cwd: string
   projectFiles?: Record<string, string>
@@ -236,14 +267,17 @@ export async function generateInitialRunState({
   agentDefinitions?: AgentDefinition[]
   customToolDefinitions?: CustomToolDefinition[]
   maxAgentSteps?: number
+  fs: CodebuffFileSystem
 }): Promise<RunState> {
   return {
-    sessionState: await initialSessionState(cwd, {
+    sessionState: await initialSessionState({
+      cwd,
       projectFiles,
       knowledgeFiles,
       agentDefinitions,
       customToolDefinitions,
       maxAgentSteps,
+      fs,
     }),
     output: {
       type: 'error',
@@ -259,8 +293,7 @@ export function withAdditionalMessage({
   runState: RunState
   message: Message
 }): RunState {
-  // Deep copy
-  const newRunState = JSON.parse(JSON.stringify(runState)) as typeof runState
+  const newRunState = cloneDeep(runState)
 
   newRunState.sessionState.mainAgentState.messageHistory.push(message)
 

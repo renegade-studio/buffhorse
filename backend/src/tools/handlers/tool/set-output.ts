@@ -1,29 +1,12 @@
-import { getAgentTemplate } from '../../../templates/agent-registry'
-import { logger } from '../../../util/logger'
+import { getAgentTemplate } from '@codebuff/agent-runtime/templates/agent-registry'
 
-import type { CodebuffToolHandlerFunction } from '../handler-function-type'
-import type {
-  CodebuffToolCall,
-  CodebuffToolOutput,
-} from '@codebuff/common/tools/list'
-import type { AgentTemplate } from '@codebuff/common/types/agent-template'
-import type { AgentState } from '@codebuff/common/types/session-state'
-import type { ProjectFileContext } from '@codebuff/common/util/file'
+import type { CodebuffToolHandlerFunction } from '@codebuff/agent-runtime/tools/handlers/handler-function-type'
 
 type ToolName = 'set_output'
-export const handleSetOutput = ((params: {
-  previousToolCallFinished: Promise<void>
-  toolCall: CodebuffToolCall<ToolName>
-  fileContext: ProjectFileContext
-  state: {
-    agentState?: AgentState
-    localAgentTemplates?: Record<string, AgentTemplate>
-  }
-}): {
-  result: Promise<CodebuffToolOutput<ToolName>>
-  state: { agentState: AgentState }
-} => {
-  const { previousToolCallFinished, toolCall, state } = params
+export const handleSetOutput: CodebuffToolHandlerFunction<ToolName> = (
+  params,
+) => {
+  const { previousToolCallFinished, toolCall, state, logger } = params
   const output = toolCall.input
   const { agentState, localAgentTemplates } = state
 
@@ -43,10 +26,11 @@ export const handleSetOutput = ((params: {
     // Validate output against outputSchema if defined
     let agentTemplate = null
     if (agentState.agentType) {
-      agentTemplate = await getAgentTemplate(
-        agentState.agentType,
+      agentTemplate = await getAgentTemplate({
+        ...params,
+        agentId: agentState.agentType,
         localAgentTemplates,
-      )
+      })
     }
     if (agentTemplate?.outputSchema) {
       try {
@@ -86,4 +70,4 @@ export const handleSetOutput = ((params: {
     })(),
     state: { agentState: agentState },
   }
-}) satisfies CodebuffToolHandlerFunction<ToolName>
+}

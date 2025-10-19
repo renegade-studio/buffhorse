@@ -1,7 +1,9 @@
 #!/usr/bin/env bun
 
+import { execFileSync } from 'child_process'
 import path from 'path'
 
+import { generateCompactId } from '@codebuff/common/util/string'
 import { Command, Flags } from '@oclif/core'
 
 import { sendEvalResultsEmail } from './email-eval-results'
@@ -12,8 +14,14 @@ import {
   setGlobalConcurrencyLimit,
   terminateAllEvalChildren,
 } from './run-git-evals'
+import {
+  printComparisonTable,
+  runMultiAgentEvals,
+  writeComparisonResults,
+} from './run-eval-set-multi-agent'
 
 import type { EvalConfig, EvalResult } from './types'
+import type { AgentConfig } from './run-eval-set-multi-agent'
 import type { GitEvalResultRequest } from '@codebuff/common/db/schema'
 
 const DEFAULT_OUTPUT_DIR = 'git-evals'
@@ -25,13 +33,23 @@ class RunEvalSetCommand extends Command {
 
   static examples = [
     '$ bun run run-eval-set',
-    '$ bun run run-eval-set --output-dir custom-output',
+    '$ bun run run-eval-set --sets codebuff,manifold',
+    '$ bun run run-eval-set --sets all',
+    '$ bun run run-eval-set --sets plane --output-dir custom-output',
     '$ bun run run-eval-set --email --no-analysis',
     '$ bun run run-eval-set --mock --no-insert',
     '$ bun run run-eval-set --title "Weekly Performance Test"',
+    '$ bun run run-eval-set --agents base,base-lite,base2 --sets codebuff',
+    '$ bun run run-eval-set --concurrency 1',
   ]
 
   static flags = {
+    sets: Flags.string({
+      char: 's',
+      description:
+        'Comma-separated list of eval sets to run (codebuff, manifold, plane, saleor) or "all" for all sets',
+      default: 'codebuff',
+    }),
     'output-dir': Flags.string({
       char: 'o',
       description: 'Output directory for evaluation results',
@@ -63,7 +81,8 @@ class RunEvalSetCommand extends Command {
     }),
     concurrency: Flags.integer({
       char: 'c',
-      description: 'Number of concurrent evals to run',
+      description:
+        'Number of concurrent evals to run. Use 1 to see subprocess logs for debugging.',
       min: 1,
     }),
     'coding-agent': Flags.string({
@@ -72,7 +91,16 @@ class RunEvalSetCommand extends Command {
     }),
     agent: Flags.string({
       description: 'Codebuff agent id to use',
-      default: 'base-lite',
+      default: 'base',
+    }),
+    'prompt-with-agent': Flags.boolean({
+      description: 'Prompt with agent',
+      default: false,
+      allowNo: true,
+    }),
+    agents: Flags.string({
+      description:
+        'Agent ID for single-agent mode, or comma-separated list of valid agent IDs for multi-agent comparison (e.g., base,base-lite,base2). Check .agents directory for available agents.',
     }),
     help: Flags.help({ char: 'h' }),
   }
@@ -80,11 +108,219 @@ class RunEvalSetCommand extends Command {
   async run(): Promise<void> {
     const { flags } = await this.parse(RunEvalSetCommand)
 
+    if (flags.agents) {
+      const agentList = flags.agents.split(',').map((a) => a.trim())
+      if (agentList.length > 1) {
+        await runMultiAgentEvalSet({
+          agents: flags.agents,
+          sets: flags.sets,
+          'output-dir': flags['output-dir'],
+          concurrency: flags.concurrency,
+          'coding-agent': flags['coding-agent'],
+          'prompt-with-agent': flags['prompt-with-agent'],
+        })
+        return
+      }
+    }
+
     await runEvalSet(flags)
   }
 }
 
+/**
+ * Creates a git worktree for the current commit to isolate code version
+ */
+function createEvalWorktree(): string {
+  const currentCommit = execFileSync('git', ['rev-parse', 'HEAD'], {
+    encoding: 'utf-8',
+  }).trim()
+
+  const worktreeId = generateCompactId()
+  // Get project root by going up from the evals/git-evals directory
+  const projectRoot = path.resolve(__dirname, '../..')
+  const worktreePath = path.resolve(
+    projectRoot,
+    '..',
+    `codebuff-eval-worktree-${worktreeId}`,
+  )
+
+  console.log(`Creating eval worktree at ${worktreePath}...`)
+  console.log(`Commit: ${currentCommit}`)
+
+  try {
+    execFileSync('git', ['worktree', 'add', worktreePath, currentCommit], {
+      stdio: 'inherit',
+    })
+    console.log('✅ Worktree created successfully')
+
+    // Install dependencies in worktree to ensure node_modules are in sync
+    console.log('Installing dependencies in worktree...')
+    execFileSync('bun', ['install'], {
+      cwd: worktreePath,
+      stdio: 'inherit',
+    })
+    console.log('✅ Dependencies installed successfully')
+
+    return worktreePath
+  } catch (error) {
+    console.error('Failed to create worktree:', error)
+    throw error
+  }
+}
+
+/**
+ * Removes the eval worktree
+ */
+function cleanupEvalWorktree(worktreePath: string): void {
+  console.log(`\nCleaning up eval worktree at ${worktreePath}...`)
+
+  try {
+    // Remove the worktree
+    execFileSync('git', ['worktree', 'remove', worktreePath, '--force'], {
+      stdio: 'inherit',
+    })
+    console.log('✅ Worktree removed successfully')
+  } catch (error) {
+    console.error('Failed to remove worktree:', error)
+    // Try to prune if remove failed
+    try {
+      execFileSync('git', ['worktree', 'prune'], { stdio: 'inherit' })
+    } catch (pruneError) {
+      console.error('Failed to prune worktrees:', pruneError)
+    }
+  }
+}
+
+function getAllEvalConfigs(baseDir: string, outputDir: string): EvalConfig[] {
+  return [
+    {
+      name: 'codebuff',
+      evalDataPath: path.join(baseDir, 'eval-codebuff2.json'),
+      outputDir,
+    },
+    {
+      name: 'manifold',
+      evalDataPath: path.join(baseDir, 'eval-manifold2.json'),
+      outputDir,
+    },
+    {
+      name: 'plane',
+      evalDataPath: path.join(baseDir, 'eval-plane.json'),
+      outputDir,
+    },
+    {
+      name: 'saleor',
+      evalDataPath: path.join(baseDir, 'eval-saleor.json'),
+      outputDir,
+    },
+  ]
+}
+
+async function runMultiAgentEvalSet(options: {
+  agents: string
+  sets: string
+  'output-dir': string
+  concurrency?: number
+  'coding-agent': string
+  'prompt-with-agent': boolean
+}): Promise<void> {
+  const {
+    agents: agentsStr,
+    sets,
+    'output-dir': outputDir,
+    'coding-agent': codingAgentStr,
+    'prompt-with-agent': promptWithAgent,
+  } = options
+
+  if (!['codebuff', 'claude'].includes(codingAgentStr)) {
+    throw new Error(`Invalid coding agent: ${codingAgentStr}`)
+  }
+  const codingAgent = codingAgentStr as 'codebuff' | 'claude'
+
+  console.log('Starting multi-agent eval comparison...')
+
+  const agentConfigs: AgentConfig[] = agentsStr
+    .split(',')
+    .map((id) => id.trim())
+    .map((id) => ({
+      agentId: id,
+      displayName: id,
+    }))
+
+  console.log(
+    `Comparing ${agentConfigs.length} agents: ${agentConfigs.map((a) => a.agentId).join(', ')}`,
+  )
+
+  const worktreePath = createEvalWorktree()
+
+  const signalHandler = async (signal: string) => {
+    console.log(`\nReceived ${signal}, cleaning up...`)
+    await terminateAllEvalChildren()
+    cleanupEvalWorktree(worktreePath)
+    process.exit(signal === 'SIGINT' ? 130 : 143)
+  }
+
+  process.on('SIGINT', () => signalHandler('SIGINT'))
+  process.on('SIGTERM', () => signalHandler('SIGTERM'))
+
+  setGlobalConcurrencyLimit(options.concurrency ?? 5)
+
+  const validSets = ['codebuff', 'manifold', 'plane', 'saleor']
+  const requestedSets =
+    sets.trim().toLowerCase() === 'all'
+      ? validSets
+      : sets.split(',').map((s) => s.trim())
+
+  const baseDir = path.join(worktreePath, 'evals', 'git-evals')
+
+  const evalConfigs = getAllEvalConfigs(baseDir, outputDir).filter((config) =>
+    requestedSets.includes(config.name),
+  )
+
+  console.log(
+    `Running ${evalConfigs.length} eval sets with ${agentConfigs.length} agents each`,
+  )
+
+  const startTime = Date.now()
+
+  const traceId = generateCompactId()
+  console.log(`Starting multi-agent eval run with trace ID: ${traceId}`)
+
+  try {
+    const results = await runMultiAgentEvals({
+      agents: agentConfigs,
+      evalConfigs,
+      outputDir,
+      concurrency: options.concurrency,
+      codingAgent,
+      worktreePath,
+      promptWithAgent,
+    })
+
+    const totalDuration = Date.now() - startTime
+
+    printComparisonTable(
+      results,
+      evalConfigs.map((c) => c.name),
+    )
+
+    writeComparisonResults(results, outputDir, traceId)
+
+    console.log(`\nTotal time: ${(totalDuration / 1000).toFixed(1)}s`)
+    console.log(`Results saved to: ${outputDir}`)
+
+    cleanupEvalWorktree(worktreePath)
+
+    process.exit(0)
+  } catch (error) {
+    console.error('Error in multi-agent eval:', error)
+    cleanupEvalWorktree(worktreePath)
+    process.exit(1)
+  }
+}
+
 async function runEvalSet(options: {
+  sets: string
   'output-dir': string
   email: boolean
   analysis: boolean
@@ -94,8 +330,10 @@ async function runEvalSet(options: {
   concurrency?: number
   'coding-agent': string
   agent: string
+  'prompt-with-agent': boolean
 }): Promise<void> {
   const {
+    sets,
     'output-dir': outputDir,
     email: sendEmail,
     analysis: postEvalAnalysis,
@@ -104,6 +342,7 @@ async function runEvalSet(options: {
     title,
     'coding-agent': codingAgentstr,
     agent,
+    'prompt-with-agent': promptWithAgent,
   } = options
 
   if (!['codebuff', 'claude'].includes(codingAgentstr)) {
@@ -114,10 +353,14 @@ async function runEvalSet(options: {
   console.log('Starting eval set run...')
   console.log(`Output directory: ${outputDir}`)
 
-  // Set up signal handlers to clean up child processes
+  // Create worktree to freeze code version for this eval run
+  const worktreePath = createEvalWorktree()
+
+  // Set up signal handlers to clean up child processes and worktree
   const signalHandler = async (signal: string) => {
     console.log(`\nReceived ${signal}, cleaning up evaluation processes...`)
     await terminateAllEvalChildren()
+    cleanupEvalWorktree(worktreePath)
     console.log('Cleanup complete.')
     process.exit(signal === 'SIGINT' ? 130 : 143)
   }
@@ -127,29 +370,28 @@ async function runEvalSet(options: {
 
   setGlobalConcurrencyLimit(options.concurrency ?? 5)
 
-  // Define the eval configurations
-  const evalConfigs: EvalConfig[] = [
-    {
-      name: 'codebuff',
-      evalDataPath: path.join(__dirname, 'eval-codebuff2.json'),
-      outputDir,
-    },
-    {
-      name: 'manifold',
-      evalDataPath: path.join(__dirname, 'eval-manifold2.json'),
-      outputDir,
-    },
-    {
-      name: 'plane',
-      evalDataPath: path.join(__dirname, 'eval-plane.json'),
-      outputDir,
-    },
-    {
-      name: 'saleor',
-      evalDataPath: path.join(__dirname, 'eval-saleor.json'),
-      outputDir,
-    },
-  ]
+  const validSets = ['codebuff', 'manifold', 'plane', 'saleor']
+  const requestedSets =
+    sets.trim().toLowerCase() === 'all'
+      ? validSets
+      : sets.split(',').map((s) => s.trim())
+
+  const invalidSets = requestedSets.filter((s) => !validSets.includes(s))
+
+  if (invalidSets.length > 0) {
+    throw new Error(
+      `Invalid eval sets: ${invalidSets.join(', ')}. Valid sets are: ${validSets.join(', ')} or "all"`,
+    )
+  }
+
+  // Resolve paths relative to worktree if using one
+  const baseDir = path.join(worktreePath, 'evals', 'git-evals')
+
+  const allEvalConfigs = getAllEvalConfigs(baseDir, outputDir)
+
+  const evalConfigs = allEvalConfigs.filter((config) =>
+    requestedSets.includes(config.name),
+  )
 
   console.log(`Running ${evalConfigs.length} evaluations:`)
   evalConfigs.forEach((config) => {
@@ -177,6 +419,8 @@ async function runEvalSet(options: {
             config.limit,
             options.concurrency === 1,
             agent,
+            worktreePath,
+            promptWithAgent,
           )
     } catch (error) {
       const evalDuration = Date.now() - evalStartTime
@@ -419,6 +663,9 @@ async function runEvalSet(options: {
       console.log('💾 No successful eval results to insert into database')
     }
   }
+
+  // Clean up worktree before exiting
+  cleanupEvalWorktree(worktreePath)
 
   if (failureCount > 0) {
     console.log(

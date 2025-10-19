@@ -1,20 +1,25 @@
+import { withRetry, withTimeout } from '@codebuff/common/util/promise'
+import { env } from '@codebuff/internal/env'
+import { Benchify } from 'benchify'
+
 import { handleStrReplace } from './handlers/tool/str-replace'
 import { getFileProcessingValues } from './handlers/tool/write-file'
-import { logger } from '../util/logger'
-import { Benchify } from 'benchify'
-import { env } from '@codebuff/internal/env'
-import { requestToolCall, requestFiles } from '../websockets/websocket-action'
-import { ParsedDiff, parsePatch } from 'diff'
-import { withRetry, withTimeout } from '@codebuff/common/util/promise'
-import { match, P } from 'ts-pattern'
+
 import type {
   CodebuffToolCall,
   CodebuffToolOutput,
 } from '@codebuff/common/tools/list'
+import type {
+  RequestFilesFn,
+  RequestToolCallFn,
+} from '@codebuff/common/types/contracts/client'
+import type { Logger } from '@codebuff/common/types/contracts/logger'
+import type {
+  ParamsExcluding,
+  ParamsOf,
+} from '@codebuff/common/types/function-params'
 import type { ToolResultPart } from '@codebuff/common/types/messages/content-part'
 import type { PrintModeEvent } from '@codebuff/common/types/print-mode'
-
-import type { WebSocket } from 'ws'
 
 export type DeferredStrReplace = {
   toolCall: CodebuffToolCall<'str_replace'>
@@ -46,7 +51,8 @@ let benchifyCircuitBreaker = {
 const CIRCUIT_BREAKER_THRESHOLD = 3 // Open circuit after 3 consecutive failures
 const CIRCUIT_BREAKER_TIMEOUT = 60000 // Keep circuit open for 1 minute
 
-export function getBenchifyClient(): Benchify | null {
+export function getBenchifyClient(params: { logger: Logger }): Benchify | null {
+  const { logger } = params
   if (!benchifyClient) {
     let benchifyApiKey: string | undefined
     try {
@@ -73,7 +79,6 @@ export function getBenchifyClient(): Benchify | null {
 }
 
 type BatchContext = {
-  ws: WebSocket
   userInputId: string
   onResponseChunk: (chunk: string | PrintModeEvent) => void
   state: Record<string, any>
@@ -82,29 +87,24 @@ type BatchContext = {
   intendedChanges: Record<string, string>
 }
 
-export async function executeBatchStrReplaces({
-  deferredStrReplaces,
-  toolCalls,
-  toolResults,
-  ws,
-  agentStepId,
-  clientSessionId,
-  userInputId,
-  onResponseChunk,
-  state,
-  userId,
-}: {
-  deferredStrReplaces: DeferredStrReplace[]
-  toolCalls: (CodebuffToolCall | any)[]
-  toolResults: ToolResultPart[]
-  ws: WebSocket
-  agentStepId: string
-  clientSessionId: string
-  userInputId: string
-  onResponseChunk: (chunk: string | PrintModeEvent) => void
-  state: Record<string, any>
-  userId: string | undefined
-}) {
+export async function executeBatchStrReplaces(
+  params: {
+    deferredStrReplaces: DeferredStrReplace[]
+    agentStepId: string
+    logger: Logger
+  } & ParamsExcluding<
+    typeof applyBenchifyIfNeeded,
+    'originalContents' | 'editedFiles' | 'intendedChanges' | 'toolCalls'
+  > &
+    ParamsOf<typeof createRequestClientToolCall> &
+    ParamsExcluding<typeof preloadOriginalContent, 'operationsByPath'> &
+    ParamsExcluding<
+      typeof processPathOperations,
+      'operations' | 'editedFiles' | 'requestClientToolCall'
+    >,
+) {
+  const { deferredStrReplaces, agentStepId, logger } = params
+
   if (deferredStrReplaces.length === 0) {
     return
   }
@@ -120,31 +120,31 @@ export async function executeBatchStrReplaces({
   }
 
   // Pre-load original content for all paths that support benchify
-  const originalContents = await preloadOriginalContent(operationsByPath, ws)
+  const originalContents = await preloadOriginalContent({
+    ...params,
+    operationsByPath,
+  })
 
   // Extract intended changes for benchify (before execution)
-  const intendedChanges = await extractAllIntendedChanges(
+  const intendedChanges = await extractAllIntendedChanges({
     operationsByPath,
     originalContents,
-  )
+    logger,
+  })
 
   // Track edited files during processing
   const editedFiles: Record<string, string> = {}
 
   // Create the requestClientToolCall function once for all operations
-  const requestClientToolCall = createRequestClientToolCall({ ws, userInputId })
+  const requestClientToolCall = createRequestClientToolCall(params)
 
   // Execute operations grouped by path for better parallelization
   const pathPromises: Record<string, Promise<void>> = {}
 
   for (const [path, operations] of Object.entries(operationsByPath)) {
-    pathPromises[path] = processPathOperations(operations, {
-      toolCalls,
-      toolResults,
-      agentStepId,
-      userInputId,
-      onResponseChunk,
-      state,
+    pathPromises[path] = processPathOperations({
+      ...params,
+      operations,
       editedFiles,
       requestClientToolCall,
     })
@@ -154,25 +154,13 @@ export async function executeBatchStrReplaces({
   await Promise.all(Object.values(pathPromises))
 
   // Apply benchify if we have intended changes
-  await applyBenchifyIfNeeded(
-    {
-      ws,
-      userInputId,
-      onResponseChunk,
-      state,
-      originalContents,
-      editedFiles,
-      intendedChanges,
-    },
-    {
-      agentStepId,
-      clientSessionId,
-      userInputId,
-      userId,
-      toolResults,
-      toolCalls: deferredStrReplaces.map((d) => d.toolCall),
-    },
-  )
+  await applyBenchifyIfNeeded({
+    ...params,
+    originalContents,
+    editedFiles,
+    intendedChanges,
+    toolCalls: deferredStrReplaces.map((d) => d.toolCall),
+  })
   logger.debug({ agentStepId }, 'Completed batch processing')
 }
 
@@ -180,10 +168,13 @@ export async function executeBatchStrReplaces({
  * Pre-loads original file content for all paths that support benchify
  * Returns a record of path to content for files that were successfully loaded
  */
-async function preloadOriginalContent(
-  operationsByPath: Record<string, DeferredStrReplace[]>,
-  ws: WebSocket,
-): Promise<Record<string, string>> {
+async function preloadOriginalContent(params: {
+  operationsByPath: Record<string, DeferredStrReplace[]>
+  requestFiles: RequestFilesFn
+  logger: Logger
+}): Promise<Record<string, string>> {
+  const { operationsByPath, requestFiles, logger } = params
+
   const pathsToLoad = Object.keys(operationsByPath).filter(
     benchifyCanFixLanguage,
   )
@@ -194,7 +185,7 @@ async function preloadOriginalContent(
 
   try {
     // Request all files from the client in one batch
-    const fileContents = await requestFiles({ ws, filePaths: pathsToLoad })
+    const fileContents = await requestFiles({ filePaths: pathsToLoad })
 
     // Filter out null values and return only successfully loaded files
     const loadedContents: Record<string, string> = {}
@@ -220,10 +211,12 @@ async function preloadOriginalContent(
  * Extracts intended changes for all operations (for benchify)
  * Returns an object mapping path to intended content after all operations are applied
  */
-async function extractAllIntendedChanges(
-  operationsByPath: Record<string, DeferredStrReplace[]>,
-  originalContents: Record<string, string>,
-): Promise<Record<string, string>> {
+async function extractAllIntendedChanges(params: {
+  operationsByPath: Record<string, DeferredStrReplace[]>
+  originalContents: Record<string, string>
+  logger: Logger
+}): Promise<Record<string, string>> {
+  const { operationsByPath, originalContents, logger } = params
   const intendedChanges: Record<string, string> = {}
 
   for (const [path, operations] of Object.entries(operationsByPath)) {
@@ -237,8 +230,11 @@ async function extractAllIntendedChanges(
       // Apply all operations sequentially to get final intended content
       for (const { toolCall } of operations) {
         currentContent =
-          (await extractIntendedContent(toolCall, currentContent)) ||
-          currentContent
+          (await extractIntendedContent({
+            toolCall,
+            currentContent,
+            logger,
+          })) || currentContent
       }
 
       intendedChanges[path] = currentContent
@@ -257,27 +253,26 @@ async function extractAllIntendedChanges(
  * Processes all operations for a single file path sequentially
  */
 async function processPathOperations(
-  operations: DeferredStrReplace[],
-  context: {
-    toolCalls: (CodebuffToolCall | any)[]
-    toolResults: ToolResultPart[]
-    agentStepId: string
-    userInputId: string
-    onResponseChunk: (chunk: string | PrintModeEvent) => void
-    state: Record<string, any>
-    editedFiles: Record<string, string>
-    requestClientToolCall: (
-      clientToolCall: any,
-    ) => Promise<CodebuffToolOutput<'str_replace'>>
-  },
+  params: {
+    operations: DeferredStrReplace[]
+  } & ParamsExcluding<
+    typeof executeSingleStrReplace,
+    'toolCall' | 'operationIndex' | 'totalOperations'
+  >,
 ) {
+  const { operations } = params
   let previousPromise = Promise.resolve()
 
   for (let i = 0; i < operations.length; i++) {
     const { toolCall } = operations[i]
 
     previousPromise = previousPromise.then(() =>
-      executeSingleStrReplace(toolCall, i + 1, operations.length, context),
+      executeSingleStrReplace({
+        ...params,
+        toolCall,
+        operationIndex: i + 1,
+        totalOperations: operations.length,
+      }),
     )
   }
 
@@ -288,10 +283,10 @@ async function processPathOperations(
  * Executes a single str_replace operation with proper error handling
  */
 async function executeSingleStrReplace(
-  toolCall: CodebuffToolCall<'str_replace'>,
-  operationIndex: number,
-  totalOperations: number,
-  context: {
+  params: {
+    toolCall: CodebuffToolCall<'str_replace'>
+    operationIndex: number
+    totalOperations: number
     toolCalls: (CodebuffToolCall | any)[]
     toolResults: ToolResultPart[]
     agentStepId: string
@@ -302,9 +297,16 @@ async function executeSingleStrReplace(
     requestClientToolCall: (
       clientToolCall: any,
     ) => Promise<CodebuffToolOutput<'str_replace'>>
-  },
+    logger: Logger
+  } & ParamsExcluding<
+    typeof handleStrReplace,
+    'previousToolCallFinished' | 'writeToClient' | 'getLatestState' | 'state'
+  >,
 ) {
   const {
+    toolCall,
+    operationIndex,
+    totalOperations,
     userInputId,
     onResponseChunk,
     state,
@@ -312,8 +314,8 @@ async function executeSingleStrReplace(
     toolCalls,
     toolResults,
     agentStepId,
-    requestClientToolCall,
-  } = context
+    logger,
+  } = params
 
   try {
     // Create isolated state for each operation
@@ -327,9 +329,8 @@ async function executeSingleStrReplace(
     }
 
     const { result } = handleStrReplace({
+      ...params,
       previousToolCallFinished: Promise.resolve(),
-      toolCall,
-      requestClientToolCall,
       writeToClient: onResponseChunk,
       getLatestState: () => getFileProcessingValues(isolatedState),
       state: isolatedState,
@@ -343,6 +344,7 @@ async function executeSingleStrReplace(
       toolResults.push(toolResultPart)
       onResponseChunk({
         type: 'tool_result',
+        toolName: toolResultPart.toolName,
         toolCallId: toolCall.toolCallId,
         output: toolResult,
       })
@@ -359,11 +361,16 @@ async function executeSingleStrReplace(
 
     toolCalls.push(toolCall)
   } catch (error) {
-    handleStrReplaceError(error, toolCall, operationIndex, totalOperations, {
+    handleStrReplaceError({
+      error,
+      toolCall,
+      operationIndex,
+      totalOperations,
       toolResults,
       agentStepId,
       userInputId,
       onResponseChunk,
+      logger,
     })
   }
 }
@@ -372,19 +379,18 @@ async function executeSingleStrReplace(
  * Creates a typed requestClientToolCall function for batch mode
  */
 function createRequestClientToolCall(params: {
-  ws: WebSocket
+  requestToolCall: RequestToolCallFn
   userInputId: string
 }) {
-  const { ws, userInputId } = params
+  const { requestToolCall, userInputId } = params
   return async (
     clientToolCall: any,
   ): Promise<CodebuffToolOutput<'str_replace'>> => {
-    const result = await requestToolCall(
-      ws,
+    const result = await requestToolCall({
       userInputId,
-      clientToolCall.toolName,
-      clientToolCall.input,
-    )
+      toolName: clientToolCall.toolName,
+      input: clientToolCall.input,
+    })
     return result.output as CodebuffToolOutput<'str_replace'>
   }
 }
@@ -427,19 +433,28 @@ function trackEditedFile(
 /**
  * Handles errors from str_replace operations with proper logging and error results
  */
-function handleStrReplaceError(
-  error: unknown,
-  toolCall: CodebuffToolCall<'str_replace'>,
-  operationIndex: number,
-  totalOperations: number,
-  context: {
-    toolResults: ToolResultPart[]
-    agentStepId: string
-    userInputId: string
-    onResponseChunk: (chunk: string | PrintModeEvent) => void
-  },
-) {
-  const { toolResults, agentStepId, userInputId, onResponseChunk } = context
+function handleStrReplaceError(params: {
+  error: unknown
+  toolCall: CodebuffToolCall<'str_replace'>
+  operationIndex: number
+  totalOperations: number
+  toolResults: ToolResultPart[]
+  agentStepId: string
+  userInputId: string
+  onResponseChunk: (chunk: string | PrintModeEvent) => void
+  logger: Logger
+}) {
+  const {
+    error,
+    toolCall,
+    operationIndex,
+    totalOperations,
+    toolResults,
+    agentStepId,
+    userInputId,
+    onResponseChunk,
+    logger,
+  } = params
 
   logger.error(
     {
@@ -476,6 +491,7 @@ function handleStrReplaceError(
   toolResults.push(errorResult)
   onResponseChunk({
     type: 'tool_result',
+    toolName: errorResult.toolName,
     toolCallId: toolCall.toolCallId,
     output: errorResult.output,
   })
@@ -485,70 +501,85 @@ function handleStrReplaceError(
  * Applies benchify results if there are intended changes (with graceful failure handling)
  */
 async function applyBenchifyIfNeeded(
-  batchContext: BatchContext,
-  options: {
+  params: {
     agentStepId: string
     clientSessionId: string
     userInputId: string
     userId: string | undefined
     toolResults: ToolResultPart[]
     toolCalls: CodebuffToolCall<'str_replace'>[]
-  },
+    logger: Logger
+  } & BatchContext &
+    ParamsExcluding<typeof callBenchifyWithResilience, 'editedFiles'> &
+    ParamsExcluding<
+      typeof applyBenchifyResultsGracefully,
+      'editedFiles' | 'benchifyDiff' | 'state'
+    > &
+    ParamsExcluding<
+      typeof handleBenchifyFailure,
+      'error' | 'intendedChangeFiles'
+    >,
 ) {
+  const {
+    intendedChanges,
+    state,
+    originalContents,
+    agentStepId,
+    userInputId,
+    logger,
+  } = params
   // Early exit conditions - fail gracefully without blocking user edits
-  if (Object.keys(batchContext.intendedChanges).length === 0) {
+  if (Object.keys(intendedChanges).length === 0) {
     return
   }
 
   // Check circuit breaker
-  if (isBenchifyCircuitOpen()) {
+  if (isBenchifyCircuitOpen({ logger })) {
     return
   }
 
   try {
     // Filter and validate intended changes for Benchify
-    const filteredChanges = filterBenchifyFiles(
-      Object.entries(batchContext.intendedChanges).map(([path, contents]) => ({
+    const filteredChanges = filterBenchifyFiles({
+      files: Object.entries(intendedChanges).map(([path, contents]) => ({
         path,
         contents,
       })),
-      options.agentStepId,
-    )
+      agentStepId,
+      logger,
+    })
 
     if (filteredChanges.length === 0) {
       return
     }
 
     // Call Benchify with timeout and retry logic
-    const benchifyResult = await callBenchifyWithResilience(
-      filteredChanges,
-      options,
-    )
+    const benchifyResult = await callBenchifyWithResilience({
+      ...params,
+      editedFiles: filteredChanges,
+    })
 
     if (benchifyResult && benchifyResult.length > 0) {
       // Apply results with individual error handling to prevent one failure from blocking others
-      await applyBenchifyResultsGracefully(filteredChanges, benchifyResult, {
-        ws: batchContext.ws,
-        onResponseChunk: batchContext.onResponseChunk,
+      await applyBenchifyResultsGracefully({
+        ...params,
+        editedFiles: filteredChanges,
+        benchifyDiff: benchifyResult,
         state: {
-          ...batchContext.state,
-          originalContents: batchContext.originalContents,
+          ...state,
+          originalContents,
         },
-        toolResults: options.toolResults,
-        toolCalls: options.toolCalls,
-        userInputId: options.userInputId,
-        agentStepId: options.agentStepId,
       })
     }
 
     // Reset circuit breaker on success
-    resetBenchifyCircuitBreaker()
+    resetBenchifyCircuitBreaker({ logger })
   } catch (error) {
     // Handle Benchify failure gracefully without blocking user edits
-    handleBenchifyFailure(error, {
-      intendedChangeFiles: Object.keys(batchContext.intendedChanges),
-      agentStepId: options.agentStepId,
-      userInputId: options.userInputId,
+    handleBenchifyFailure({
+      ...params,
+      error,
+      intendedChangeFiles: Object.keys(intendedChanges),
     })
   }
 }
@@ -556,10 +587,12 @@ async function applyBenchifyIfNeeded(
 /**
  * Filters files for Benchify processing based on size and count limits
  */
-function filterBenchifyFiles(
-  files: { path: string; contents: string }[],
-  agentStepId: string,
-): { path: string; contents: string }[] {
+function filterBenchifyFiles(params: {
+  files: { path: string; contents: string }[]
+  agentStepId: string
+  logger: Logger
+}): { path: string; contents: string }[] {
+  const { files, agentStepId, logger } = params
   const filtered = files.filter((file) => {
     // Check file size limit
     if (file.contents.length > BENCHIFY_MAX_FILE_SIZE) {
@@ -597,16 +630,23 @@ function filterBenchifyFiles(
 /**
  * Calls benchify API with timeout and retry logic using common utilities
  */
-async function callBenchifyWithResilience(
-  editedFiles: { path: string; contents: string }[],
-  context: {
-    agentStepId: string
-    clientSessionId: string
-    userInputId: string
-    userId: string | undefined
-  },
-): Promise<string | null> {
-  const client = getBenchifyClient()
+async function callBenchifyWithResilience(params: {
+  editedFiles: { path: string; contents: string }[]
+  agentStepId: string
+  clientSessionId: string
+  userInputId: string
+  userId: string | undefined
+  logger: Logger
+}): Promise<string | null> {
+  const {
+    editedFiles,
+    agentStepId,
+    clientSessionId,
+    userInputId,
+    userId,
+    logger,
+  } = params
+  const client = getBenchifyClient({ logger })
   if (!client) {
     return null
   }
@@ -617,8 +657,8 @@ async function callBenchifyWithResilience(
         {
           fileCount: editedFiles.length,
           filePaths: editedFiles.map((f) => f.path),
-          agentStepId: context.agentStepId,
-          userInputId: context.userInputId,
+          agentStepId: agentStepId,
+          userInputId: userInputId,
         },
         'Calling Benchify API',
       )
@@ -646,7 +686,7 @@ async function callBenchifyWithResilience(
           {
             error: error instanceof Error ? error.message : String(error),
             attempt,
-            agentStepId: context.agentStepId,
+            agentStepId,
           },
           'Retrying Benchify call',
         )
@@ -687,22 +727,25 @@ function shouldRetryBenchifyError(error: Error): boolean {
  * Applies benchify results back to the file system with individual error handling
  */
 async function applyBenchifyResultsGracefully(
-  editedFiles: { path: string; contents: string }[],
-  benchifyDiff: string,
-  context: {
-    ws: WebSocket
-    onResponseChunk: (chunk: string | PrintModeEvent) => void
-    state: Record<string, any>
-    toolResults: ToolResultPart[]
-    toolCalls: CodebuffToolCall<'str_replace'>[]
-    userInputId: string
+  params: {
+    editedFiles: { path: string; contents: string }[]
+    benchifyDiff: string
     agentStepId: string
-  },
+    logger: Logger
+  } & ParamsExcluding<
+    typeof applyBenchifyResultSafely,
+    'benchifyFile' | 'benchifyDiff'
+  >,
 ) {
+  const { editedFiles, benchifyDiff, agentStepId, logger } = params
   const results = await Promise.allSettled(
     editedFiles.map((editedFile) => {
       if (benchifyDiff) {
-        applyBenchifyResultSafely(editedFile, benchifyDiff, context)
+        applyBenchifyResultSafely({
+          ...params,
+          benchifyFile: editedFile,
+          benchifyDiff,
+        })
       } else {
         logger.warn(
           { file: editedFile.path },
@@ -719,7 +762,7 @@ async function applyBenchifyResultsGracefully(
       {
         failureCount: failures.length,
         totalFiles: editedFiles.length,
-        agentStepId: context.agentStepId,
+        agentStepId,
       },
       'Some Benchify results failed to apply',
     )
@@ -729,38 +772,49 @@ async function applyBenchifyResultsGracefully(
 /**
  * Safely applies a single Benchify result with comprehensive error handling
  */
-async function applyBenchifyResultSafely(
-  benchifyFile: { path: string; contents: string },
-  benchifyDiff: string,
-  context: {
-    ws: WebSocket
-    onResponseChunk: (chunk: string | PrintModeEvent) => void
-    state: Record<string, any>
-    toolResults: ToolResultPart[]
-    toolCalls: CodebuffToolCall<'str_replace'>[]
-    userInputId: string
-    agentStepId: string
-  },
-): Promise<void> {
+async function applyBenchifyResultSafely(params: {
+  benchifyFile: { path: string; contents: string }
+  benchifyDiff: string
+  onResponseChunk: (chunk: string | PrintModeEvent) => void
+  state: Record<string, any>
+  toolResults: ToolResultPart[]
+  toolCalls: CodebuffToolCall<'str_replace'>[]
+  userInputId: string
+  agentStepId: string
+  requestToolCall: RequestToolCallFn
+  logger: Logger
+}): Promise<void> {
+  const {
+    benchifyFile,
+    benchifyDiff,
+    onResponseChunk,
+    requestToolCall,
+    logger,
+    toolCalls,
+    agentStepId,
+    userInputId,
+    state,
+    toolResults,
+  } = params
   try {
     // Find the corresponding tool call for this file
-    const relatedToolCall = context.toolCalls.find(
+    const relatedToolCall = toolCalls.find(
       (tc) => tc.input.path === benchifyFile.path,
     )
 
     if (!relatedToolCall) {
       logger.debug(
-        { fileName: benchifyFile.path, agentStepId: context.agentStepId },
+        { fileName: benchifyFile.path, agentStepId: agentStepId },
         'No matching tool call found for benchify result',
       )
       return
     }
 
     // Get the original content, preferring the latest applied content if available
-    let baseContent = context.state.originalContents?.[benchifyFile.path]
+    let baseContent = state.originalContents?.[benchifyFile.path]
 
     // Try to get more recent content from tool results if available
-    const latestToolResult = context.toolResults
+    const latestToolResult = toolResults
       .filter(
         (tr) =>
           tr.toolName === 'str_replace' &&
@@ -781,7 +835,7 @@ async function applyBenchifyResultSafely(
 
     if (!baseContent) {
       logger.debug(
-        { path: benchifyFile.path, agentStepId: context.agentStepId },
+        { path: benchifyFile.path, agentStepId },
         'Could not find base content for Benchify diff generation',
       )
       return
@@ -789,10 +843,14 @@ async function applyBenchifyResultSafely(
 
     // Apply with timeout to prevent hanging
     const toolCallResult = await withTimeout(
-      requestToolCall(context.ws, context.userInputId, 'str_replace', {
-        type: 'patch',
-        path: benchifyFile.path,
-        content: benchifyDiff,
+      requestToolCall({
+        userInputId,
+        toolName: 'str_replace',
+        input: {
+          type: 'patch',
+          path: benchifyFile.path,
+          content: benchifyDiff,
+        },
       }),
       5000,
       'Benchify patch application timed out',
@@ -807,25 +865,26 @@ async function applyBenchifyResultSafely(
     }
 
     // Update the existing tool result
-    const existingResultIndex = context.toolResults.findIndex(
+    const existingResultIndex = toolResults.findIndex(
       (tr) => tr.toolCallId === relatedToolCall.toolCallId,
     )
 
     if (existingResultIndex >= 0) {
-      context.toolResults[existingResultIndex] = benchifyToolResult
+      toolResults[existingResultIndex] = benchifyToolResult
     } else {
-      context.toolResults.push(benchifyToolResult)
+      toolResults.push(benchifyToolResult)
     }
 
     // Notify client about the benchify update
-    context.onResponseChunk({
+    onResponseChunk({
       type: 'tool_result',
+      toolName: benchifyToolResult.toolName,
       toolCallId: relatedToolCall.toolCallId,
       output: benchifyToolResult.output,
     })
 
     logger.debug(
-      { path: benchifyFile.path, agentStepId: context.agentStepId },
+      { path: benchifyFile.path, agentStepId },
       'Successfully applied Benchify result',
     )
   } catch (error) {
@@ -834,7 +893,7 @@ async function applyBenchifyResultSafely(
       {
         error: error instanceof Error ? error.message : String(error),
         fileName: benchifyFile.path,
-        agentStepId: context.agentStepId,
+        agentStepId,
       },
       'Failed to apply individual Benchify result',
     )
@@ -844,10 +903,12 @@ async function applyBenchifyResultSafely(
 /**
  * Extracts the intended file content by applying str_replace operations to the current content
  */
-async function extractIntendedContent(
-  toolCall: CodebuffToolCall<'str_replace'>,
-  currentContent: string,
-): Promise<string | null> {
+async function extractIntendedContent(params: {
+  toolCall: CodebuffToolCall<'str_replace'>
+  currentContent: string
+  logger: Logger
+}): Promise<string | null> {
+  const { toolCall, currentContent, logger } = params
   try {
     let content = currentContent
 
@@ -895,7 +956,8 @@ async function extractIntendedContent(
 /**
  * Circuit breaker functions for Benchify resilience
  */
-function isBenchifyCircuitOpen(): boolean {
+function isBenchifyCircuitOpen(params: { logger: Logger }): boolean {
+  const { logger } = params
   const now = Date.now()
 
   // Check if circuit should be half-open (reset after timeout)
@@ -908,14 +970,15 @@ function isBenchifyCircuitOpen(): boolean {
   return benchifyCircuitBreaker.isOpen
 }
 
-function handleBenchifyFailure(
-  error: unknown,
-  context: {
-    intendedChangeFiles: string[]
-    agentStepId: string
-    userInputId: string
-  },
-): void {
+function handleBenchifyFailure(params: {
+  error: unknown
+  intendedChangeFiles: string[]
+  agentStepId: string
+  userInputId: string
+  logger: Logger
+}): void {
+  const { error, intendedChangeFiles, agentStepId, userInputId, logger } =
+    params
   benchifyCircuitBreaker.failureCount++
   benchifyCircuitBreaker.lastFailureTime = Date.now()
 
@@ -930,7 +993,7 @@ function handleBenchifyFailure(
         circuitOpenUntil: new Date(
           benchifyCircuitBreaker.openUntil,
         ).toISOString(),
-        agentStepId: context.agentStepId,
+        agentStepId,
       },
       'Benchify circuit breaker opened due to consecutive failures',
     )
@@ -941,15 +1004,16 @@ function handleBenchifyFailure(
     {
       error: error instanceof Error ? error.message : String(error),
       failureCount: benchifyCircuitBreaker.failureCount,
-      intendedChangeFiles: context.intendedChangeFiles,
-      agentStepId: context.agentStepId,
-      userInputId: context.userInputId,
+      intendedChangeFiles,
+      agentStepId,
+      userInputId,
     },
     'Benchify call failed, continuing without fixes',
   )
 }
 
-function resetBenchifyCircuitBreaker(): void {
+function resetBenchifyCircuitBreaker(params: { logger: Logger }): void {
+  const { logger } = params
   if (benchifyCircuitBreaker.failureCount > 0) {
     logger.debug(
       { previousFailures: benchifyCircuitBreaker.failureCount },

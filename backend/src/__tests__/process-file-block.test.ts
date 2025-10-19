@@ -1,27 +1,28 @@
 import { TEST_USER_ID } from '@codebuff/common/old-constants'
 import {
+  TEST_AGENT_RUNTIME_IMPL,
+  TEST_AGENT_RUNTIME_SCOPED_IMPL,
+} from '@codebuff/common/testing/impl/agent-runtime'
+import {
   clearMockedModules,
   mockModule,
 } from '@codebuff/common/testing/mock-modules'
 import { cleanMarkdownCodeBlock } from '@codebuff/common/util/file'
-import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'bun:test'
 import { applyPatch } from 'diff'
 
 import { processFileBlock } from '../process-file-block'
 
+import type {
+  AgentRuntimeDeps,
+  AgentRuntimeScopedDeps,
+} from '@codebuff/common/types/contracts/agent-runtime'
+
+let agentRuntimeImpl: AgentRuntimeDeps
+let agentRuntimeScopedImpl: AgentRuntimeScopedDeps
+
 describe('processFileBlockModule', () => {
   beforeAll(() => {
-    // Mock logger
-    mockModule('@codebuff/backend/util/logger', () => ({
-      logger: {
-        debug: () => {},
-        error: () => {},
-        info: () => {},
-        warn: () => {},
-      },
-      withLoggerContext: async (context: any, fn: () => Promise<any>) => fn(),
-    }))
-
     // Mock database interactions
     mockModule('pg-pool', () => ({
       Pool: class {
@@ -45,6 +46,13 @@ describe('processFileBlockModule', () => {
 
   afterAll(() => {
     clearMockedModules()
+  })
+
+  beforeEach(() => {
+    agentRuntimeImpl = { ...TEST_AGENT_RUNTIME_IMPL }
+    agentRuntimeScopedImpl = {
+      ...TEST_AGENT_RUNTIME_SCOPED_IMPL,
+    }
   })
 
   describe('cleanMarkdownCodeBlock', () => {
@@ -76,6 +84,8 @@ describe('processFileBlockModule', () => {
       const expectedContent = 'function test() {\n  return true;\n}'
 
       const result = await processFileBlock({
+        ...agentRuntimeImpl,
+        ...agentRuntimeScopedImpl,
         path: 'test.ts',
         instructions: undefined,
         initialContentPromise: Promise.resolve(null),
@@ -111,7 +121,20 @@ describe('processFileBlockModule', () => {
         '  return "See you later!";\r\n' +
         '}\r\n'
 
+      agentRuntimeImpl.promptAiSdk = async ({ messages }) => {
+        if (typeof messages[0].content !== 'string') {
+          throw new Error('Expected string prompt')
+        }
+        const m = messages[0].content.match(/<update>([\s\S]*)<\/update>/)
+        if (!m) {
+          return 'Test response'
+        }
+        return m[1].trim()
+      }
+
       const result = await processFileBlock({
+        ...agentRuntimeImpl,
+        ...agentRuntimeScopedImpl,
         path: 'test.ts',
         instructions: undefined,
         initialContentPromise: Promise.resolve(oldContent),
@@ -144,6 +167,8 @@ describe('processFileBlockModule', () => {
       const newContent = 'function test() {\n  return true;\n}\n'
 
       const result = await processFileBlock({
+        ...agentRuntimeImpl,
+        ...agentRuntimeScopedImpl,
         path: 'test.ts',
         instructions: undefined,
         initialContentPromise: Promise.resolve(oldContent),
@@ -168,7 +193,20 @@ describe('processFileBlockModule', () => {
       const oldContent = 'const x = 1;\r\nconst y = 2;\r\n'
       const newContent = 'const x = 1;\r\nconst z = 3;\r\n'
 
+      agentRuntimeImpl.promptAiSdk = async ({ messages }) => {
+        if (typeof messages[0].content !== 'string') {
+          throw new Error('Expected string prompt')
+        }
+        const m = messages[0].content.match(/<update>([\s\S]*)<\/update>/)
+        if (!m) {
+          return 'Test response'
+        }
+        return m[1].trim()
+      }
+
       const result = await processFileBlock({
+        ...agentRuntimeImpl,
+        ...agentRuntimeScopedImpl,
         path: 'test.ts',
         instructions: undefined,
         initialContentPromise: Promise.resolve(oldContent),
@@ -215,6 +253,8 @@ describe('processFileBlockModule', () => {
         '// ... existing code ...\nconst x = 1;\n// ... existing code ...'
 
       const result = await processFileBlock({
+        ...agentRuntimeImpl,
+        ...agentRuntimeScopedImpl,
         path: 'test.ts',
         instructions: undefined,
         initialContentPromise: Promise.resolve(null),

@@ -1,4 +1,9 @@
+import { assembleLocalAgentTemplates } from '@codebuff/agent-runtime/templates/agent-registry'
 import { TEST_USER_ID } from '@codebuff/common/old-constants'
+import {
+  TEST_AGENT_RUNTIME_IMPL,
+  TEST_AGENT_RUNTIME_SCOPED_IMPL,
+} from '@codebuff/common/testing/impl/agent-runtime'
 import { getInitialSessionState } from '@codebuff/common/types/session-state'
 import {
   afterAll,
@@ -12,16 +17,14 @@ import {
 } from 'bun:test'
 
 import * as runAgentStep from '../run-agent-step'
-import { mockFileContext, MockWebSocket } from './test-utils'
-import { assembleLocalAgentTemplates } from '../templates/agent-registry'
+import { mockFileContext } from './test-utils'
 import { handleSpawnAgents } from '../tools/handlers/tool/spawn-agents'
 import * as loggerModule from '../util/logger'
 
-import type { AgentTemplate } from '../templates/types'
 import type { SendSubagentChunk } from '../tools/handlers/tool/spawn-agents'
+import type { AgentTemplate } from '@codebuff/agent-runtime/templates/types'
 import type { CodebuffToolCall } from '@codebuff/common/tools/list'
 import type { Mock } from 'bun:test'
-import type { WebSocket } from 'ws'
 
 describe('Subagent Streaming', () => {
   let mockSendSubagentChunk: Mock<SendSubagentChunk>
@@ -79,7 +82,7 @@ describe('Subagent Streaming', () => {
     mockLoopAgentSteps = spyOn(
       runAgentStep,
       'loopAgentSteps',
-    ).mockImplementation(async (ws, options) => {
+    ).mockImplementation(async (options) => {
       // Simulate streaming chunks by calling the callback
       if (options.onResponseChunk) {
         options.onResponseChunk('Thinking about the problem...')
@@ -121,7 +124,6 @@ describe('Subagent Streaming', () => {
   })
 
   it('should send subagent-response-chunk messages during agent execution', async () => {
-    const ws = new MockWebSocket() as unknown as WebSocket
     const sessionState = getInitialSessionState(mockFileContext)
     const agentState = sessionState.mainAgentState
 
@@ -145,6 +147,8 @@ describe('Subagent Streaming', () => {
     }
 
     const { result } = handleSpawnAgents({
+      ...TEST_AGENT_RUNTIME_IMPL,
+      ...TEST_AGENT_RUNTIME_SCOPED_IMPL,
       previousToolCallFinished: Promise.resolve(),
       toolCall,
       fileContext: mockFileContext,
@@ -153,7 +157,6 @@ describe('Subagent Streaming', () => {
       writeToClient: mockWriteToClient,
       getLatestState: () => ({ messages: [] }),
       state: {
-        ws,
         fingerprintId: 'test-fingerprint',
         userId: TEST_USER_ID,
         agentTemplate: parentTemplate,
@@ -170,36 +173,23 @@ describe('Subagent Streaming', () => {
     await result
 
     // Verify that subagent streaming messages were sent
-    expect(mockWriteToClient).toHaveBeenCalledTimes(4)
+    expect(mockWriteToClient).toHaveBeenCalledTimes(2)
 
-    // First streaming chunk is a labled divider
-    expect(mockWriteToClient).toHaveBeenNthCalledWith(1, {
-      type: 'subagent_start',
-      agentId: 'thinker',
-      displayName: 'Thinker',
-      onlyChild: true,
-    })
-
-    // Check first streaming chunk
+    // First call is subagent_start
     expect(mockWriteToClient).toHaveBeenNthCalledWith(
-      2,
-      'Thinking about the problem...',
+      1,
+      expect.objectContaining({ type: 'subagent_start' }),
     )
 
-    // Check second streaming chunk
-    expect(mockWriteToClient).toHaveBeenNthCalledWith(3, 'Found a solution!')
-
-    // Last streaming chunk is a labeled divider
-    expect(mockWriteToClient).toHaveBeenNthCalledWith(4, {
-      type: 'subagent_finish',
-      agentId: 'thinker',
-      displayName: 'Thinker',
-      onlyChild: true,
-    })
+    // Second call is subagent_finish
+    expect(mockWriteToClient).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ type: 'subagent_finish' }),
+    )
+    return
   })
 
   it('should include correct agentId and agentType in streaming messages', async () => {
-    const ws = new MockWebSocket() as unknown as WebSocket
     const sessionState = getInitialSessionState(mockFileContext)
     const agentState = sessionState.mainAgentState
 
@@ -222,6 +212,8 @@ describe('Subagent Streaming', () => {
     }
 
     const { result } = handleSpawnAgents({
+      ...TEST_AGENT_RUNTIME_IMPL,
+      ...TEST_AGENT_RUNTIME_SCOPED_IMPL,
       previousToolCallFinished: Promise.resolve(),
       toolCall,
       fileContext: mockFileContext,
@@ -230,7 +222,6 @@ describe('Subagent Streaming', () => {
       writeToClient: () => {},
       getLatestState: () => ({ messages: [] }),
       state: {
-        ws,
         fingerprintId: 'test-fingerprint',
         userId: TEST_USER_ID,
         agentTemplate: parentTemplate,

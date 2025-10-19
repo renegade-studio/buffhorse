@@ -1,15 +1,22 @@
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible'
 import { websiteUrl } from '@codebuff/npm-app/config'
-import { streamText } from 'ai'
+import { generateObject } from 'ai'
+import z from 'zod/v4'
 
 const codebuffBackendProvider = createOpenAICompatible({
   name: 'codebuff',
   apiKey: '12345',
   baseURL: websiteUrl + '/api/v1',
+  // apiKey: process.env.OPEN_ROUTER_API_KEY,
+  // baseURL: 'https://openrouter.ai/api/v1',
+  supportsStructuredOutputs: true,
 })
 
-const response = streamText({
-  model: codebuffBackendProvider('anthropic/claude-sonnet-4.5'),
+const response = await generateObject({
+  schema: z.object({ greeting: z.string() }),
+  // const response = await streamText({
+  // const response = await generateText({
+  model: codebuffBackendProvider('openai/gpt-5'),
   messages: [
     {
       role: 'user',
@@ -44,6 +51,8 @@ const response = streamText({
     },
   },
 })
-for await (const chunk of response.fullStream) {
-  console.log('asdf', { chunk })
-}
+
+console.dir({ response }, { depth: null })
+// for await (const chunk of response.fullStream) {
+//   console.dir({ chunk }, { depth: null })
+// }

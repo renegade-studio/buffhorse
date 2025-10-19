@@ -1,5 +1,10 @@
 import { dirname, isAbsolute, normalize } from 'path'
 
+import {
+  castAssistantMessage,
+  messagesWithSystem,
+  getMessagesSubset,
+} from '@codebuff/agent-runtime/util/messages'
 import { insertTrace } from '@codebuff/bigquery'
 import db from '@codebuff/common/db'
 import * as schema from '@codebuff/common/db/schema'
@@ -14,31 +19,29 @@ import { range, shuffle, uniq } from 'lodash'
 
 import { CustomFilePickerConfigSchema } from './custom-file-picker-config'
 import { promptFlashWithFallbacks } from '../llm-apis/gemini-with-fallbacks'
-import { promptAiSdk } from '../llm-apis/vercel-ai-sdk/ai-sdk'
-import { logger } from '../util/logger'
-import {
-  castAssistantMessage,
-  messagesWithSystem,
-  getMessagesSubset,
-} from '../util/messages'
 import { getRequestContext } from '../websockets/request-context'
 
 import type { CustomFilePickerConfig } from './custom-file-picker-config'
-import type { TextBlock } from '../llm-apis/claude'
+import type { TextBlock } from '@codebuff/agent-runtime/llm-api/claude'
 import type {
   GetExpandedFileContextForTrainingTrace,
   GetRelevantFilesTrace,
 } from '@codebuff/bigquery'
+import type { PromptAiSdkFn } from '@codebuff/common/types/contracts/llm'
+import type { Logger } from '@codebuff/common/types/contracts/logger'
+import type { ParamsExcluding } from '@codebuff/common/types/function-params'
 import type { Message } from '@codebuff/common/types/messages/codebuff-message'
 import type { ProjectFileContext } from '@codebuff/common/util/file'
 
 const NUMBER_OF_EXAMPLE_FILES = 100
 const MAX_FILES_PER_REQUEST = 30
 
-export async function getCustomFilePickerConfigForOrg(
-  orgId: string | undefined,
-  isRepoApprovedForUserInOrg: boolean | undefined,
-): Promise<CustomFilePickerConfig | null> {
+export async function getCustomFilePickerConfigForOrg(params: {
+  orgId: string | undefined
+  isRepoApprovedForUserInOrg: boolean | undefined
+  logger: Logger
+}): Promise<CustomFilePickerConfig | null> {
+  const { orgId, isRepoApprovedForUserInOrg, logger } = params
   if (!orgId || !isRepoApprovedForUserInOrg) {
     return null
   }
@@ -119,29 +122,35 @@ function isValidFilePickerModelName(
 }
 
 export async function requestRelevantFiles(
-  {
-    messages,
-    system,
-  }: {
+  params: {
     messages: Message[]
     system: string | Array<TextBlock>
-  },
-  fileContext: ProjectFileContext,
-  assistantPrompt: string | null,
-  agentStepId: string,
-  clientSessionId: string,
-  fingerprintId: string,
-  userInputId: string,
-  userId: string | undefined,
-  repoId: string | undefined,
+    fileContext: ProjectFileContext
+    assistantPrompt: string | null
+    agentStepId: string
+    clientSessionId: string
+    fingerprintId: string
+    userInputId: string
+    userId: string | undefined
+    repoId: string | undefined
+    logger: Logger
+  } & ParamsExcluding<
+    typeof getRelevantFiles,
+    'messages' | 'userPrompt' | 'requestType' | 'modelId'
+  >,
 ) {
+  const { messages, fileContext, assistantPrompt, logger } = params
   // Check for organization custom file picker feature
   const requestContext = getRequestContext()
   const orgId = requestContext?.approvedOrgIdForRepo
-  const customFilePickerConfig = await getCustomFilePickerConfigForOrg(
-    orgId,
-    requestContext?.isRepoApprovedForUserInOrg,
-  )
+  const customFilePickerConfig = null satisfies Awaited<
+    ReturnType<typeof getCustomFilePickerConfigForOrg>
+  > as Awaited<ReturnType<typeof getCustomFilePickerConfigForOrg>>
+  // const customFilePickerConfig = await getCustomFilePickerConfigForOrg({
+  //   orgId,
+  //   isRepoApprovedForUserInOrg: requestContext?.isRepoApprovedForUserInOrg,
+  //   logger,
+  // })
 
   const countPerRequest = 12
 
@@ -180,21 +189,13 @@ export async function requestRelevantFiles(
     }
   }
 
-  const keyPromise = getRelevantFiles(
-    {
-      messages: messagesExcludingLastIfByUser,
-      system,
-    },
-    keyPrompt,
-    'Key',
-    agentStepId,
-    clientSessionId,
-    fingerprintId,
-    userInputId,
-    userId,
-    repoId,
-    modelIdForRequest,
-  ).catch((error) => {
+  const keyPromise = getRelevantFiles({
+    ...params,
+    messages: messagesExcludingLastIfByUser,
+    userPrompt: keyPrompt,
+    requestType: 'Key',
+    modelId: modelIdForRequest,
+  }).catch((error) => {
     logger.error({ error }, 'Error requesting key files')
     return { files: [] as string[], duration: 0 }
   })
@@ -217,22 +218,17 @@ export async function requestRelevantFiles(
 }
 
 export async function requestRelevantFilesForTraining(
-  {
-    messages,
-    system,
-  }: {
+  params: {
     messages: Message[]
-    system: string | Array<TextBlock>
-  },
-  fileContext: ProjectFileContext,
-  assistantPrompt: string | null,
-  agentStepId: string,
-  clientSessionId: string,
-  fingerprintId: string,
-  userInputId: string,
-  userId: string | undefined,
-  repoId: string | undefined,
+    fileContext: ProjectFileContext
+    assistantPrompt: string | null
+    logger: Logger
+  } & ParamsExcluding<
+    typeof getRelevantFilesForTraining,
+    'messages' | 'userPrompt' | 'requestType'
+  >,
 ) {
+  const { messages, fileContext, assistantPrompt, logger } = params
   const COUNT = 50
 
   const lastMessage = messages[messages.length - 1]
@@ -258,35 +254,19 @@ export async function requestRelevantFilesForTraining(
     COUNT,
   )
 
-  const keyFiles = await getRelevantFilesForTraining(
-    {
-      messages: messagesExcludingLastIfByUser,
-      system,
-    },
-    keyFilesPrompt,
-    'Key',
-    agentStepId,
-    clientSessionId,
-    fingerprintId,
-    userInputId,
-    userId,
-    repoId,
-  )
+  const keyFiles = await getRelevantFilesForTraining({
+    ...params,
+    messages: messagesExcludingLastIfByUser,
+    userPrompt: keyFilesPrompt,
+    requestType: 'Key',
+  })
 
-  const nonObviousFiles = await getRelevantFilesForTraining(
-    {
-      messages: messagesExcludingLastIfByUser,
-      system,
-    },
-    nonObviousPrompt,
-    'Non-Obvious',
-    agentStepId,
-    clientSessionId,
-    fingerprintId,
-    userInputId,
-    userId,
-    repoId,
-  )
+  const nonObviousFiles = await getRelevantFilesForTraining({
+    ...params,
+    messages: messagesExcludingLastIfByUser,
+    userPrompt: nonObviousPrompt,
+    requestType: 'Non-Obvious',
+  })
 
   const candidateFiles = [...keyFiles.files, ...nonObviousFiles.files]
   const validatedFiles = validateFilePaths(uniq(candidateFiles))
@@ -298,36 +278,55 @@ export async function requestRelevantFilesForTraining(
 }
 
 async function getRelevantFiles(
-  {
-    messages,
-    system,
-  }: {
+  params: {
     messages: Message[]
     system: string | Array<TextBlock>
-  },
-  userPrompt: string,
-  requestType: string,
-  agentStepId: string,
-  clientSessionId: string,
-  fingerprintId: string,
-  userInputId: string,
-  userId: string | undefined,
-  repoId: string | undefined,
-  modelId?: FinetunedVertexModel,
+    userPrompt: string
+    requestType: string
+    agentStepId: string
+    clientSessionId: string
+    fingerprintId: string
+    userInputId: string
+    userId: string | undefined
+    repoId: string | undefined
+    modelId?: FinetunedVertexModel
+    logger: Logger
+  } & ParamsExcluding<
+    typeof promptFlashWithFallbacks,
+    'messages' | 'model' | 'useFinetunedModel'
+  >,
 ) {
+  const {
+    messages,
+    system,
+    userPrompt,
+    requestType,
+    agentStepId,
+    clientSessionId,
+    fingerprintId,
+    userInputId,
+    userId,
+    repoId,
+    modelId,
+    logger,
+  } = params
   const bufferTokens = 100_000
-  const messagesWithPrompt = getMessagesSubset(
-    [
+  const messagesWithPrompt = getMessagesSubset({
+    messages: [
       ...messages,
       {
         role: 'user' as const,
         content: userPrompt,
       },
     ],
-    bufferTokens,
-  )
+    otherTokens: bufferTokens,
+    logger,
+  })
   const start = performance.now()
-  let codebuffMessages = messagesWithSystem({ messages: messagesWithPrompt, system })
+  let codebuffMessages = messagesWithSystem({
+    messages: messagesWithPrompt,
+    system,
+  })
 
   // Converts assistant messages to user messages for finetuned model
   codebuffMessages = codebuffMessages
@@ -341,13 +340,11 @@ async function getRelevantFiles(
     .filter((msg) => msg !== null)
   const finetunedModel = modelId ?? finetunedVertexModels.ft_filepicker_010
 
-  let response = await promptFlashWithFallbacks(codebuffMessages, {
-    clientSessionId,
-    userInputId,
+  let response = await promptFlashWithFallbacks({
+    ...params,
+    messages: codebuffMessages,
     model: models.openrouter_gemini2_5_flash,
-    userId,
     useFinetunedModel: finetunedModel,
-    fingerprintId,
   })
   const end = performance.now()
   const duration = end - start
@@ -381,41 +378,52 @@ async function getRelevantFiles(
 }
 
 async function getRelevantFilesForTraining(
-  {
-    messages,
-    system,
-  }: {
+  params: {
     messages: Message[]
     system: string | Array<TextBlock>
-  },
-  userPrompt: string,
-  requestType: string,
-  agentStepId: string,
-  clientSessionId: string,
-  fingerprintId: string,
-  userInputId: string,
-  userId: string | undefined,
-  repoId: string | undefined,
+    userPrompt: string
+    requestType: string
+    agentStepId: string
+    clientSessionId: string
+    fingerprintId: string
+    userInputId: string
+    userId: string | undefined
+    repoId: string | undefined
+    promptAiSdk: PromptAiSdkFn
+    logger: Logger
+  } & ParamsExcluding<PromptAiSdkFn, 'messages' | 'model' | 'chargeUser'>,
 ) {
+  const {
+    messages,
+    system,
+    userPrompt,
+    requestType,
+    agentStepId,
+    clientSessionId,
+    fingerprintId,
+    userInputId,
+    userId,
+    repoId,
+    promptAiSdk,
+    logger,
+  } = params
   const bufferTokens = 100_000
-  const messagesWithPrompt = getMessagesSubset(
-    [
+  const messagesWithPrompt = getMessagesSubset({
+    messages: [
       ...messages,
       {
         role: 'user' as const,
         content: userPrompt,
       },
     ],
-    bufferTokens,
-  )
+    otherTokens: bufferTokens,
+    logger,
+  })
   const start = performance.now()
   let response = await promptAiSdk({
+    ...params,
     messages: messagesWithSystem({ messages: messagesWithPrompt, system }),
-    clientSessionId,
-    fingerprintId,
-    userInputId,
     model: models.openrouter_claude_sonnet_4,
-    userId,
     chargeUser: false,
   })
 
@@ -489,7 +497,10 @@ function generateNonObviousRequestFilesPrompt(
   fileContext: ProjectFileContext,
   count: number,
 ): string {
-  const exampleFiles = getExampleFileList({ fileContext, count: NUMBER_OF_EXAMPLE_FILES })
+  const exampleFiles = getExampleFileList({
+    fileContext,
+    count: NUMBER_OF_EXAMPLE_FILES,
+  })
   return `
 Your task is to find the second-order relevant files for the following user request (in quotes).
 
@@ -544,7 +555,10 @@ function generateKeyRequestFilesPrompt(
   fileContext: ProjectFileContext,
   count: number,
 ): string {
-  const exampleFiles = getExampleFileList({ fileContext, count: NUMBER_OF_EXAMPLE_FILES })
+  const exampleFiles = getExampleFileList({
+    fileContext,
+    count: NUMBER_OF_EXAMPLE_FILES,
+  })
 
   return `
 Your task is to find the most relevant files for the following user request (in quotes).

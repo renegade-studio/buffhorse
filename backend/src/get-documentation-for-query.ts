@@ -4,8 +4,13 @@ import { uniq } from 'lodash'
 import { z } from 'zod/v4'
 
 import { fetchContext7LibraryDocumentation } from './llm-apis/context7-api'
-import { promptAiSdkStructured } from './llm-apis/vercel-ai-sdk/ai-sdk'
-import { logger } from './util/logger'
+
+import type { PromptAiSdkStructuredFn } from '@codebuff/common/types/contracts/llm'
+import type { Logger } from '@codebuff/common/types/contracts/logger'
+import type {
+  ParamsExcluding,
+  ParamsOf,
+} from '@codebuff/common/types/function-params'
 
 const DELIMITER = `\n\n----------------------------------------\n\n`
 
@@ -20,19 +25,30 @@ const DELIMITER = `\n\n----------------------------------------\n\n`
  * @returns The documentation text chunks or null if no relevant docs found
  */
 export async function getDocumentationForQuery(
-  query: string,
-  options: {
+  params: {
+    query: string
     tokens?: number
     clientSessionId: string
     userInputId: string
     fingerprintId: string
     userId?: string
-  },
+    logger: Logger
+  } & ParamsOf<typeof suggestLibraries> &
+    ParamsExcluding<typeof filterRelevantChunks, 'allChunks'>,
 ): Promise<string | null> {
+  const {
+    query,
+    tokens,
+    clientSessionId,
+    userInputId,
+    fingerprintId,
+    userId,
+    logger,
+  } = params
   const startTime = Date.now()
 
   // 1. Search for relevant libraries
-  const libraryResults = await suggestLibraries(query, options)
+  const libraryResults = await suggestLibraries(params)
 
   if (!libraryResults || libraryResults.libraries.length === 0) {
     logger.info(
@@ -53,9 +69,11 @@ export async function getDocumentationForQuery(
   const allRawChunks = (
     await Promise.all(
       libraries.map(({ libraryName, topic }) =>
-        fetchContext7LibraryDocumentation(libraryName, {
-          tokens: options.tokens,
+        fetchContext7LibraryDocumentation({
+          query: libraryName,
+          tokens,
           topic,
+          logger,
         }),
       ),
     )
@@ -85,11 +103,16 @@ export async function getDocumentationForQuery(
   }
 
   // 3. Filter relevant chunks using another LLM call
-  const filterResults = await filterRelevantChunks(
+  const filterResults = await filterRelevantChunks({
+    ...params,
     query,
-    allUniqueChunks,
-    options,
-  )
+    allChunks: allUniqueChunks,
+    clientSessionId,
+    userInputId,
+    fingerprintId,
+    userId,
+    logger,
+  })
 
   const totalDuration = Date.now() - startTime
 
@@ -136,14 +159,16 @@ export async function getDocumentationForQuery(
 }
 
 const suggestLibraries = async (
-  query: string,
-  options: {
-    clientSessionId: string
-    userInputId: string
-    fingerprintId: string
-    userId?: string
-  },
+  params: {
+    query: string
+    promptAiSdkStructured: PromptAiSdkStructuredFn
+    logger: Logger
+  } & ParamsExcluding<
+    PromptAiSdkStructuredFn,
+    'messages' | 'model' | 'temperature' | 'schema' | 'timeout'
+  >,
 ) => {
+  const { query, promptAiSdkStructured, logger } = params
   const prompt =
     `You are an expert at documentation for libraries. Given a user's query return a list of (library name, topic) where each library name is the name of a library and topic is a keyword or phrase that specifies a topic within the library that is most relevant to the user's query.
 
@@ -163,9 +188,8 @@ ${closeXml('user_query')}
   const geminiStartTime = Date.now()
   try {
     const response = await promptAiSdkStructured({
-      ...options,
+      ...params,
       messages: [{ role: 'user', content: prompt }],
-      userId: options.userId,
       model: models.openrouter_gemini2_5_flash,
       temperature: 0,
       schema: z.object({
@@ -199,15 +223,17 @@ ${closeXml('user_query')}
  * @returns A promise that resolves to an object containing the relevant chunks and Gemini call duration, or null if an error occurs.
  */
 async function filterRelevantChunks(
-  query: string,
-  allChunks: string[],
-  options: {
-    clientSessionId: string
-    userInputId: string
-    fingerprintId: string
-    userId?: string
-  },
+  params: {
+    query: string
+    allChunks: string[]
+    promptAiSdkStructured: PromptAiSdkStructuredFn
+    logger: Logger
+  } & ParamsExcluding<
+    PromptAiSdkStructuredFn,
+    'messages' | 'model' | 'temperature' | 'schema' | 'timeout'
+  >,
 ): Promise<{ relevantChunks: string[]; geminiDuration: number } | null> {
+  const { query, allChunks, promptAiSdkStructured, logger } = params
   const prompt = `You are an expert at analyzing documentation queries. Given a user's query and a list of documentation chunks, determine which chunks are relevant to the query. Choose as few chunks as possible, likely none. Only include chunks if they are relevant to the user query.
 
 <user_query>
@@ -222,11 +248,8 @@ ${closeXml('documentation_chunks')}
   const geminiStartTime = Date.now()
   try {
     const response = await promptAiSdkStructured({
+      ...params,
       messages: [{ role: 'user', content: prompt }],
-      clientSessionId: options.clientSessionId,
-      userInputId: options.userInputId,
-      fingerprintId: options.fingerprintId,
-      userId: options.userId,
       model: models.openrouter_gemini2_5_flash,
       temperature: 0,
       schema: z.object({

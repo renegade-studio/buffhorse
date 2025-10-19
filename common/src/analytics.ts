@@ -2,7 +2,7 @@ import { env } from '@codebuff/internal'
 import { PostHog } from 'posthog-node'
 
 import type { AnalyticsEvent } from './constants/analytics-events'
-import type { Logger } from '@codebuff/types/logger'
+import type { Logger } from '@codebuff/common/types/contracts/logger'
 
 let client: PostHog | undefined
 
@@ -46,7 +46,8 @@ export function trackEvent({
   logger: Logger
 }) {
   if (env.NEXT_PUBLIC_CB_ENVIRONMENT !== 'prod') {
-    logger.info({ payload: { event, properties } }, 'Analytics event tracked')
+    // Note (James): This log was too noisy. Reenable it as you need to test something.
+    // logger.info({ payload: { event, properties } }, event)
     return
   }
 

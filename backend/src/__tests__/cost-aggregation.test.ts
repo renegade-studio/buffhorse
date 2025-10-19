@@ -1,3 +1,8 @@
+import * as agentRegistry from '@codebuff/agent-runtime/templates/agent-registry'
+import {
+  TEST_AGENT_RUNTIME_IMPL,
+  TEST_AGENT_RUNTIME_SCOPED_IMPL,
+} from '@codebuff/common/testing/impl/agent-runtime'
 import {
   getInitialAgentState,
   getInitialSessionState,
@@ -12,13 +17,11 @@ import {
   mock,
 } from 'bun:test'
 
-import * as agentRegistry from '../templates/agent-registry'
 import * as spawnAgentUtils from '../tools/handlers/tool/spawn-agent-utils'
 import { handleSpawnAgents } from '../tools/handlers/tool/spawn-agents'
 
 import type { AgentState } from '@codebuff/common/types/session-state'
 import type { ProjectFileContext } from '@codebuff/common/util/file'
-import type { WebSocket } from 'ws'
 
 const mockFileContext: ProjectFileContext = {
   projectRoot: '/test',
@@ -133,7 +136,6 @@ describe('Cost Aggregation System', () => {
       }
 
       const mockValidatedState = {
-        ws: new MockWebSocket() as unknown as WebSocket,
         fingerprintId: 'test-fingerprint',
         userId: 'test-user',
         agentTemplate: mockAgentTemplate,
@@ -179,6 +181,8 @@ describe('Cost Aggregation System', () => {
       }
 
       const result = handleSpawnAgents({
+        ...TEST_AGENT_RUNTIME_IMPL,
+        ...TEST_AGENT_RUNTIME_SCOPED_IMPL,
         previousToolCallFinished: Promise.resolve(),
         toolCall: mockToolCall,
         fileContext: mockFileContext,
@@ -206,7 +210,6 @@ describe('Cost Aggregation System', () => {
       }
 
       const mockValidatedState = {
-        ws: new MockWebSocket() as unknown as WebSocket,
         fingerprintId: 'test-fingerprint',
         userId: 'test-user',
         agentTemplate: mockAgentTemplate,
@@ -258,6 +261,8 @@ describe('Cost Aggregation System', () => {
       }
 
       const result = handleSpawnAgents({
+        ...TEST_AGENT_RUNTIME_IMPL,
+        ...TEST_AGENT_RUNTIME_SCOPED_IMPL,
         previousToolCallFinished: Promise.resolve(),
         toolCall: mockToolCall,
         fileContext: mockFileContext,
@@ -363,7 +368,6 @@ describe('Cost Aggregation System', () => {
 
       // Mock subagent spawning that adds their costs
       const mockValidatedState = {
-        ws: new MockWebSocket() as unknown as WebSocket,
         fingerprintId: 'test-fingerprint',
         userId: 'test-user',
         agentTemplate: mockAgentTemplate,
@@ -414,6 +418,8 @@ describe('Cost Aggregation System', () => {
       }
 
       const result = handleSpawnAgents({
+        ...TEST_AGENT_RUNTIME_IMPL,
+        ...TEST_AGENT_RUNTIME_SCOPED_IMPL,
         previousToolCallFinished: Promise.resolve(),
         toolCall: mockToolCall,
         fileContext: mockFileContext,

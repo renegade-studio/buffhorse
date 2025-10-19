@@ -1,6 +1,11 @@
+import { assembleLocalAgentTemplates } from '@codebuff/agent-runtime/templates/agent-registry'
 import * as bigquery from '@codebuff/bigquery'
 import * as analytics from '@codebuff/common/analytics'
 import { TEST_USER_ID } from '@codebuff/common/old-constants'
+import {
+  TEST_AGENT_RUNTIME_IMPL,
+  TEST_AGENT_RUNTIME_SCOPED_IMPL,
+} from '@codebuff/common/testing/impl/agent-runtime'
 import { getToolCallString } from '@codebuff/common/tools/utils'
 import { getInitialSessionState } from '@codebuff/common/types/session-state'
 import {
@@ -13,22 +18,23 @@ import {
   test,
 } from 'bun:test'
 
-import researcherAgent from '../../../.agents/researcher'
+import researcherAgent from '../../../.agents/researcher/researcher'
 import * as checkTerminalCommandModule from '../check-terminal-command'
 import * as requestFilesPrompt from '../find-files/request-files-prompt'
 import * as liveUserInputs from '../live-user-inputs'
-import { MockWebSocket, mockFileContext } from './test-utils'
+import { mockFileContext } from './test-utils'
 import * as context7Api from '../llm-apis/context7-api'
-import * as aisdk from '../llm-apis/vercel-ai-sdk/ai-sdk'
 import { runAgentStep } from '../run-agent-step'
-import { assembleLocalAgentTemplates } from '../templates/agent-registry'
-import * as websocketAction from '../websockets/websocket-action'
 
-import type { Logger } from '@codebuff/types/logger'
-import type { WebSocket } from 'ws'
+import type {
+  AgentRuntimeDeps,
+  AgentRuntimeScopedDeps,
+} from '@codebuff/common/types/contracts/agent-runtime'
+
+let agentRuntimeImpl: AgentRuntimeDeps
 
 function mockAgentStream(content: string | string[]) {
-  spyOn(aisdk, 'promptAiSdkStream').mockImplementation(async function* ({}) {
+  agentRuntimeImpl.promptAiSdkStream = async function* ({}) {
     if (typeof content === 'string') {
       content = [content]
     }
@@ -36,20 +42,21 @@ function mockAgentStream(content: string | string[]) {
       yield { type: 'text' as const, text: chunk }
     }
     return 'mock-message-id'
-  })
+  }
 }
 
 describe('read_docs tool with researcher agent', () => {
   // Track all mocked functions to verify they're being used
   const mockedFunctions: Array<{ name: string; spy: any }> = []
-  const logger: Logger = {
-    debug: () => {},
-    error: () => {},
-    info: () => {},
-    warn: () => {},
-  }
+  let agentRuntimeScopedImpl: AgentRuntimeScopedDeps
 
   beforeEach(() => {
+    agentRuntimeImpl = { ...TEST_AGENT_RUNTIME_IMPL }
+    agentRuntimeScopedImpl = {
+      ...TEST_AGENT_RUNTIME_SCOPED_IMPL,
+      sendAction: () => {},
+    }
+
     // Clear tracked mocks
     mockedFunctions.length = 0
 
@@ -62,7 +69,7 @@ describe('read_docs tool with researcher agent', () => {
       name: 'analytics.initAnalytics',
       spy: analyticsInitSpy,
     })
-    analytics.initAnalytics({ logger })
+    analytics.initAnalytics(agentRuntimeImpl)
 
     const trackEventSpy = spyOn(analytics, 'trackEvent').mockImplementation(
       () => {},
@@ -84,54 +91,16 @@ describe('read_docs tool with researcher agent', () => {
     mockedFunctions.push({ name: 'bigquery.insertTrace', spy: insertTraceSpy })
 
     // Mock websocket actions
-    const requestFilesSpy = spyOn(
-      websocketAction,
-      'requestFiles',
-    ).mockImplementation(async () => ({}))
-    mockedFunctions.push({
-      name: 'websocketAction.requestFiles',
-      spy: requestFilesSpy,
-    })
-
-    const requestFileSpy = spyOn(
-      websocketAction,
-      'requestFile',
-    ).mockImplementation(async () => null)
-    mockedFunctions.push({
-      name: 'websocketAction.requestFile',
-      spy: requestFileSpy,
-    })
-
-    const requestToolCallSpy = spyOn(
-      websocketAction,
-      'requestToolCall',
-    ).mockImplementation(async () => ({
+    agentRuntimeScopedImpl.requestFiles = async () => ({})
+    agentRuntimeScopedImpl.requestOptionalFile = async () => null
+    agentRuntimeScopedImpl.requestToolCall = async () => ({
       output: [
         {
           type: 'json',
           value: 'Tool call success',
         },
       ],
-    }))
-    mockedFunctions.push({
-      name: 'websocketAction.requestToolCall',
-      spy: requestToolCallSpy,
     })
-
-    const sendActionSpy = spyOn(
-      websocketAction,
-      'sendAction',
-    ).mockImplementation(async () => {})
-    mockedFunctions.push({
-      name: 'websocketAction.sendAction',
-      spy: sendActionSpy,
-    })
-
-    // Mock LLM APIs
-    const promptAiSdkSpy = spyOn(aisdk, 'promptAiSdk').mockImplementation(() =>
-      Promise.resolve('Test response'),
-    )
-    mockedFunctions.push({ name: 'aisdk.promptAiSdk', spy: promptAiSdkSpy })
 
     // Mock other required modules
     const requestRelevantFilesSpy = spyOn(
@@ -235,28 +204,6 @@ describe('read_docs tool with researcher agent', () => {
     await expect(insertTraceMock?.spy()).resolves.toBe(true)
   })
 
-  test('async generator mock completes properly', async () => {
-    // Test that our async generator mock properly completes
-    const mockResponse = 'test response'
-
-    mockAgentStream(mockResponse)
-
-    const generator = aisdk.promptAiSdkStream({} as any)
-    const results = []
-
-    // Consume the generator
-    for await (const value of generator) {
-      results.push(value)
-    }
-
-    // Should have yielded exactly one value and then completed
-    expect(results).toEqual([{ type: 'text', text: mockResponse }])
-
-    // Generator should be done
-    const { done } = await generator.next()
-    expect(done).toBe(true)
-  })
-
   test('should successfully fetch documentation with basic query', async () => {
     const mockDocumentation =
       'React is a JavaScript library for building user interfaces...'
@@ -291,34 +238,33 @@ describe('read_docs tool with researcher agent', () => {
       ...sessionState.mainAgentState,
       agentType: 'researcher' as const,
     }
-    const { agentTemplates } = assembleLocalAgentTemplates(
-      mockFileContextWithAgents,
-    )
+    const { agentTemplates } = assembleLocalAgentTemplates({
+      ...agentRuntimeImpl,
+      fileContext: mockFileContextWithAgents,
+    })
 
-    const { agentState: newAgentState } = await runAgentStep(
-      new MockWebSocket() as unknown as WebSocket,
-      {
-        system: 'Test system prompt',
-        userId: TEST_USER_ID,
-        userInputId: 'test-input',
-        clientSessionId: 'test-session',
-        fingerprintId: 'test-fingerprint',
-        onResponseChunk: () => {},
-        agentType: 'researcher',
-        fileContext: mockFileContextWithAgents,
-        localAgentTemplates: agentTemplates,
-        agentState,
-        prompt: 'Get React documentation',
-        params: undefined,
-      },
-    )
+    const { agentState: newAgentState } = await runAgentStep({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
+      system: 'Test system prompt',
+      userId: TEST_USER_ID,
+      userInputId: 'test-input',
+      clientSessionId: 'test-session',
+      fingerprintId: 'test-fingerprint',
+      onResponseChunk: () => {},
+      agentType: 'researcher',
+      fileContext: mockFileContextWithAgents,
+      localAgentTemplates: agentTemplates,
+      agentState,
+      prompt: 'Get React documentation',
+      spawnParams: undefined,
+    })
 
-    expect(context7Api.fetchContext7LibraryDocumentation).toHaveBeenCalledWith(
-      'React',
-      {
-        topic: 'hooks',
-      },
-    )
+    expect(context7Api.fetchContext7LibraryDocumentation).toHaveBeenCalledWith({
+      query: 'React',
+      topic: 'hooks',
+      logger: expect.anything(),
+    })
 
     // Check that the documentation was added to the message history
     const toolResultMessages = newAgentState.messageHistory.filter(
@@ -365,11 +311,14 @@ describe('read_docs tool with researcher agent', () => {
       ...sessionState.mainAgentState,
       agentType: 'researcher' as const,
     }
-    const { agentTemplates } = assembleLocalAgentTemplates(
-      mockFileContextWithAgents,
-    )
+    const { agentTemplates } = assembleLocalAgentTemplates({
+      ...agentRuntimeImpl,
+      fileContext: mockFileContextWithAgents,
+    })
 
-    await runAgentStep(new MockWebSocket() as unknown as WebSocket, {
+    await runAgentStep({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
       system: 'Test system prompt',
       userId: TEST_USER_ID,
       userInputId: 'test-input',
@@ -381,16 +330,15 @@ describe('read_docs tool with researcher agent', () => {
       localAgentTemplates: agentTemplates,
       agentState,
       prompt: 'Get React hooks documentation',
-      params: undefined,
+      spawnParams: undefined,
     })
 
-    expect(context7Api.fetchContext7LibraryDocumentation).toHaveBeenCalledWith(
-      'React',
-      {
-        topic: 'hooks',
-        tokens: 5000,
-      },
-    )
+    expect(context7Api.fetchContext7LibraryDocumentation).toHaveBeenCalledWith({
+      query: 'React',
+      topic: 'hooks',
+      tokens: 5000,
+      logger: expect.anything(),
+    })
   }, 10000)
 
   test('should handle case when no documentation is found', async () => {
@@ -413,27 +361,27 @@ describe('read_docs tool with researcher agent', () => {
       ...sessionState.mainAgentState,
       agentType: 'researcher' as const,
     }
-    const { agentTemplates } = assembleLocalAgentTemplates(
-      mockFileContextWithAgents,
-    )
+    const { agentTemplates } = assembleLocalAgentTemplates({
+      ...agentRuntimeImpl,
+      fileContext: mockFileContextWithAgents,
+    })
 
-    const { agentState: newAgentState } = await runAgentStep(
-      new MockWebSocket() as unknown as WebSocket,
-      {
-        system: 'Test system prompt',
-        userId: TEST_USER_ID,
-        userInputId: 'test-input',
-        clientSessionId: 'test-session',
-        fingerprintId: 'test-fingerprint',
-        onResponseChunk: () => {},
-        agentType: 'researcher',
-        fileContext: mockFileContextWithAgents,
-        localAgentTemplates: agentTemplates,
-        agentState,
-        prompt: 'Get documentation for NonExistentLibrary',
-        params: undefined,
-      },
-    )
+    const { agentState: newAgentState } = await runAgentStep({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
+      system: 'Test system prompt',
+      userId: TEST_USER_ID,
+      userInputId: 'test-input',
+      clientSessionId: 'test-session',
+      fingerprintId: 'test-fingerprint',
+      onResponseChunk: () => {},
+      agentType: 'researcher',
+      fileContext: mockFileContextWithAgents,
+      localAgentTemplates: agentTemplates,
+      agentState,
+      prompt: 'Get documentation for NonExistentLibrary',
+      spawnParams: undefined,
+    })
 
     // Check that the "no documentation found" message was added
     const toolResultMessages = newAgentState.messageHistory.filter(
@@ -480,27 +428,27 @@ describe('read_docs tool with researcher agent', () => {
       ...sessionState.mainAgentState,
       agentType: 'researcher' as const,
     }
-    const { agentTemplates } = assembleLocalAgentTemplates(
-      mockFileContextWithAgents,
-    )
+    const { agentTemplates } = assembleLocalAgentTemplates({
+      ...agentRuntimeImpl,
+      fileContext: mockFileContextWithAgents,
+    })
 
-    const { agentState: newAgentState } = await runAgentStep(
-      new MockWebSocket() as unknown as WebSocket,
-      {
-        system: 'Test system prompt',
-        userId: TEST_USER_ID,
-        userInputId: 'test-input',
-        clientSessionId: 'test-session',
-        fingerprintId: 'test-fingerprint',
-        onResponseChunk: () => {},
-        agentType: 'researcher',
-        fileContext: mockFileContextWithAgents,
-        localAgentTemplates: agentTemplates,
-        agentState,
-        prompt: 'Get React documentation',
-        params: undefined,
-      },
-    )
+    const { agentState: newAgentState } = await runAgentStep({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
+      system: 'Test system prompt',
+      userId: TEST_USER_ID,
+      userInputId: 'test-input',
+      clientSessionId: 'test-session',
+      fingerprintId: 'test-fingerprint',
+      onResponseChunk: () => {},
+      agentType: 'researcher',
+      fileContext: mockFileContextWithAgents,
+      localAgentTemplates: agentTemplates,
+      agentState,
+      prompt: 'Get React documentation',
+      spawnParams: undefined,
+    })
 
     // Check that the error message was added
     const toolResultMessages = newAgentState.messageHistory.filter(
@@ -546,27 +494,27 @@ describe('read_docs tool with researcher agent', () => {
       ...sessionState.mainAgentState,
       agentType: 'researcher' as const,
     }
-    const { agentTemplates } = assembleLocalAgentTemplates(
-      mockFileContextWithAgents,
-    )
+    const { agentTemplates } = assembleLocalAgentTemplates({
+      ...agentRuntimeImpl,
+      fileContext: mockFileContextWithAgents,
+    })
 
-    const { agentState: newAgentState } = await runAgentStep(
-      new MockWebSocket() as unknown as WebSocket,
-      {
-        system: 'Test system prompt',
-        userId: TEST_USER_ID,
-        userInputId: 'test-input',
-        clientSessionId: 'test-session',
-        fingerprintId: 'test-fingerprint',
-        onResponseChunk: () => {},
-        agentType: 'researcher',
-        fileContext: mockFileContextWithAgents,
-        localAgentTemplates: agentTemplates,
-        agentState,
-        prompt: 'Get React server components documentation',
-        params: undefined,
-      },
-    )
+    const { agentState: newAgentState } = await runAgentStep({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
+      system: 'Test system prompt',
+      userId: TEST_USER_ID,
+      userInputId: 'test-input',
+      clientSessionId: 'test-session',
+      fingerprintId: 'test-fingerprint',
+      onResponseChunk: () => {},
+      agentType: 'researcher',
+      fileContext: mockFileContextWithAgents,
+      localAgentTemplates: agentTemplates,
+      agentState,
+      prompt: 'Get React server components documentation',
+      spawnParams: undefined,
+    })
 
     // Check that the topic is included in the error message
     const toolResultMessages = newAgentState.messageHistory.filter(
@@ -613,27 +561,27 @@ describe('read_docs tool with researcher agent', () => {
       ...sessionState.mainAgentState,
       agentType: 'researcher' as const,
     }
-    const { agentTemplates } = assembleLocalAgentTemplates(
-      mockFileContextWithAgents,
-    )
+    const { agentTemplates } = assembleLocalAgentTemplates({
+      ...agentRuntimeImpl,
+      fileContext: mockFileContextWithAgents,
+    })
 
-    const { agentState: newAgentState } = await runAgentStep(
-      new MockWebSocket() as unknown as WebSocket,
-      {
-        system: 'Test system prompt',
-        userId: TEST_USER_ID,
-        userInputId: 'test-input',
-        clientSessionId: 'test-session',
-        fingerprintId: 'test-fingerprint',
-        onResponseChunk: () => {},
-        agentType: 'researcher',
-        fileContext: mockFileContextWithAgents,
-        localAgentTemplates: agentTemplates,
-        agentState,
-        prompt: 'Get React documentation',
-        params: undefined,
-      },
-    )
+    const { agentState: newAgentState } = await runAgentStep({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
+      system: 'Test system prompt',
+      userId: TEST_USER_ID,
+      userInputId: 'test-input',
+      clientSessionId: 'test-session',
+      fingerprintId: 'test-fingerprint',
+      onResponseChunk: () => {},
+      agentType: 'researcher',
+      fileContext: mockFileContextWithAgents,
+      localAgentTemplates: agentTemplates,
+      agentState,
+      prompt: 'Get React documentation',
+      spawnParams: undefined,
+    })
 
     // Check that the generic error message was added
     const toolResultMessages = newAgentState.messageHistory.filter(

@@ -1,11 +1,16 @@
+import { getAgentTemplate } from '@codebuff/agent-runtime/templates/agent-registry'
 import { MAX_AGENT_STEPS_DEFAULT } from '@codebuff/common/constants/agents'
 import { parseAgentId } from '@codebuff/common/util/agent-id-parsing'
 import { generateCompactId } from '@codebuff/common/util/string'
 
-import { getAgentTemplate } from '../../../templates/agent-registry'
-import { logger } from '../../../util/logger'
+import { loopAgentSteps } from '../../../run-agent-step'
 
 import type { AgentTemplate } from '@codebuff/common/types/agent-template'
+import type { Logger } from '@codebuff/common/types/contracts/logger'
+import type {
+  ParamsExcluding,
+  OptionalFields,
+} from '@codebuff/common/types/function-params'
 import type { Message } from '@codebuff/common/types/messages/codebuff-message'
 import type { PrintModeEvent } from '@codebuff/common/types/print-mode'
 import type {
@@ -14,7 +19,7 @@ import type {
   Subgoal,
 } from '@codebuff/common/types/session-state'
 import type { ProjectFileContext } from '@codebuff/common/util/file'
-import type { WebSocket } from 'ws'
+
 export interface SpawnAgentParams {
   agent_type: string
   prompt?: string
@@ -22,7 +27,6 @@ export interface SpawnAgentParams {
 }
 
 export interface BaseSpawnState {
-  ws?: WebSocket
   fingerprintId?: string
   userId?: string
   agentTemplate?: AgentTemplate
@@ -47,7 +51,6 @@ export function validateSpawnState(
   toolName: string,
 ): Omit<Required<BaseSpawnState>, 'userId'> & { userId: string | undefined } {
   const {
-    ws,
     fingerprintId,
     agentTemplate: parentAgentTemplate,
     localAgentTemplates,
@@ -57,11 +60,6 @@ export function validateSpawnState(
     system,
   } = state
 
-  if (!ws) {
-    throw new Error(
-      `Internal error for ${toolName}: Missing WebSocket in state`,
-    )
-  }
   if (!fingerprintId) {
     throw new Error(
       `Internal error for ${toolName}: Missing fingerprintId in state`,
@@ -90,7 +88,6 @@ export function validateSpawnState(
   }
 
   return {
-    ws,
     fingerprintId,
     userId,
     agentTemplate: parentAgentTemplate,
@@ -166,14 +163,19 @@ export function getMatchingSpawn(
  * Validates agent template and permissions
  */
 export async function validateAndGetAgentTemplate(
-  agentTypeStr: string,
-  parentAgentTemplate: AgentTemplate,
-  localAgentTemplates: Record<string, AgentTemplate>,
+  params: {
+    agentTypeStr: string
+    parentAgentTemplate: AgentTemplate
+    localAgentTemplates: Record<string, AgentTemplate>
+    logger: Logger
+  } & ParamsExcluding<typeof getAgentTemplate, 'agentId'>,
 ): Promise<{ agentTemplate: AgentTemplate; agentType: string }> {
-  const agentTemplate = await getAgentTemplate(
-    agentTypeStr,
-    localAgentTemplates,
-  )
+  const { agentTypeStr, parentAgentTemplate, localAgentTemplates, logger } =
+    params
+  const agentTemplate = await getAgentTemplate({
+    ...params,
+    agentId: agentTypeStr,
+  })
 
   if (!agentTemplate) {
     throw new Error(`Agent type ${agentTypeStr} not found.`)
@@ -267,20 +269,31 @@ export function createAgentState(
 /**
  * Logs agent spawn information
  */
-export function logAgentSpawn(
-  agentTemplate: AgentTemplate,
-  agentType: string,
-  agentId: string,
-  parentId: string | undefined,
-  prompt?: string,
-  params?: any,
-  inline = false,
-): void {
+export function logAgentSpawn(params: {
+  agentTemplate: AgentTemplate
+  agentType: string
+  agentId: string
+  parentId: string | undefined
+  prompt?: string
+  spawnParams?: any
+  inline?: boolean
+  logger: Logger
+}): void {
+  const {
+    agentTemplate,
+    agentType,
+    agentId,
+    parentId,
+    prompt,
+    spawnParams,
+    inline = false,
+    logger,
+  } = params
   logger.debug(
     {
       agentTemplate,
       prompt,
-      params,
+      params: spawnParams,
       agentId,
       parentId,
     },
@@ -291,78 +304,51 @@ export function logAgentSpawn(
 /**
  * Executes a subagent using loopAgentSteps
  */
-export async function executeSubagent({
-  ws,
-  userInputId,
-  prompt,
-  params,
-  agentTemplate,
-  parentAgentState,
-  agentState,
-  fingerprintId,
-  fileContext,
-  localAgentTemplates,
-  userId,
-  clientSessionId,
-  onResponseChunk,
-  isOnlyChild = false,
-  clearUserPromptMessagesAfterResponse = true,
-  parentSystemPrompt,
-}: {
-  ws: WebSocket
-  userInputId: string
-  prompt: string
-  params: any
-  agentTemplate: AgentTemplate
-  parentAgentState: AgentState
-  agentState: AgentState
-  fingerprintId: string
-  fileContext: ProjectFileContext
-  localAgentTemplates: Record<string, AgentTemplate>
-  userId?: string
-  clientSessionId: string
-  onResponseChunk: (chunk: string | PrintModeEvent) => void
-  isOnlyChild?: boolean
-  clearUserPromptMessagesAfterResponse?: boolean
-  parentSystemPrompt?: string
-}) {
-  onResponseChunk({
-    type: 'subagent_start',
-    agentId: agentTemplate.id,
+export async function executeSubagent(
+  options: OptionalFields<
+    {
+      agentTemplate: AgentTemplate
+      parentAgentState: AgentState
+      onResponseChunk: (chunk: string | PrintModeEvent) => void
+      isOnlyChild?: boolean
+    } & ParamsExcluding<typeof loopAgentSteps, 'agentType'>,
+    'isOnlyChild' | 'clearUserPromptMessagesAfterResponse'
+  >,
+) {
+  const withDefaults = {
+    isOnlyChild: false,
+    clearUserPromptMessagesAfterResponse: true,
+    ...options,
+  }
+  const { onResponseChunk, agentTemplate, parentAgentState, isOnlyChild } =
+    withDefaults
+
+  const startEvent = {
+    type: 'subagent_start' as const,
+    agentId: withDefaults.agentState.agentId,
+    agentType: agentTemplate.id,
     displayName: agentTemplate.displayName,
     onlyChild: isOnlyChild,
-  })
+    parentAgentId: parentAgentState.agentId,
+  }
+  onResponseChunk(startEvent)
 
-  // Import loopAgentSteps dynamically to avoid circular dependency
-  const { loopAgentSteps } = await import('../../../run-agent-step')
-
-  const result = await loopAgentSteps(ws, {
-    userInputId,
-    prompt,
-    params,
+  const result = await loopAgentSteps({
+    ...withDefaults,
     agentType: agentTemplate.id,
-    agentState,
-    fingerprintId,
-    fileContext,
-    localAgentTemplates,
-    userId,
-    clientSessionId,
-    onResponseChunk,
-    clearUserPromptMessagesAfterResponse,
-    parentSystemPrompt,
   })
 
   onResponseChunk({
     type: 'subagent_finish',
-    agentId: agentTemplate.id,
+    agentId: result.agentState.agentId,
+    agentType: agentTemplate.id,
     displayName: agentTemplate.displayName,
     onlyChild: isOnlyChild,
+    parentAgentId: parentAgentState.agentId,
   })
 
   if (result.agentState.runId) {
     parentAgentState.childRunIds.push(result.agentState.runId)
-  } else {
-    logger.error('No runId found for agent state after executing agent')
   }
 
   return result

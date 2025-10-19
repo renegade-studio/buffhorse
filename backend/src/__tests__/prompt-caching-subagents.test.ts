@@ -1,29 +1,28 @@
 import { TEST_USER_ID } from '@codebuff/common/old-constants'
 import {
-  clearMockedModules,
-  mockModule,
-} from '@codebuff/common/testing/mock-modules'
+  TEST_AGENT_RUNTIME_IMPL,
+  TEST_AGENT_RUNTIME_SCOPED_IMPL,
+} from '@codebuff/common/testing/impl/agent-runtime'
 import { getInitialSessionState } from '@codebuff/common/types/session-state'
 import {
   spyOn,
   beforeEach,
   afterEach,
-  beforeAll,
-  afterAll,
   describe,
   expect,
   it,
   mock,
 } from 'bun:test'
 
-import * as aisdk from '../llm-apis/vercel-ai-sdk/ai-sdk'
 import { loopAgentSteps } from '../run-agent-step'
-import * as websocketAction from '../websockets/websocket-action'
 
-import type { AgentTemplate } from '../templates/types'
+import type { AgentTemplate } from '@codebuff/agent-runtime/templates/types'
+import type {
+  AgentRuntimeDeps,
+  AgentRuntimeScopedDeps,
+} from '@codebuff/common/types/contracts/agent-runtime'
 import type { Message } from '@codebuff/common/types/messages/codebuff-message'
 import type { ProjectFileContext } from '@codebuff/common/util/file'
-import type { WebSocket } from 'ws'
 
 const mockFileContext: ProjectFileContext = {
   projectRoot: '/test',
@@ -51,31 +50,19 @@ const mockFileContext: ProjectFileContext = {
   },
 }
 
-class MockWebSocket {
-  send(msg: string) {}
-  close() {}
-  on(event: string, listener: (...args: any[]) => void) {}
-  removeListener(event: string, listener: (...args: any[]) => void) {}
-}
-
 describe('Prompt Caching for Subagents with inheritParentSystemPrompt', () => {
   let mockLocalAgentTemplates: Record<string, AgentTemplate>
   let capturedMessages: Message[] = []
-
-  beforeAll(() => {
-    // Mock logger
-    mockModule('@codebuff/backend/util/logger', () => ({
-      logger: {
-        debug: () => {},
-        error: () => {},
-        info: () => {},
-        warn: () => {},
-      },
-      withLoggerContext: async (context: any, fn: () => Promise<any>) => fn(),
-    }))
-  })
+  let agentRuntimeImpl: AgentRuntimeDeps
+  let agentRuntimeScopedImpl: AgentRuntimeScopedDeps
 
   beforeEach(() => {
+    agentRuntimeImpl = { ...TEST_AGENT_RUNTIME_IMPL }
+    agentRuntimeScopedImpl = {
+      ...TEST_AGENT_RUNTIME_SCOPED_IMPL,
+      sendAction: () => {},
+    }
+
     capturedMessages = []
 
     // Setup mock agent templates
@@ -115,48 +102,40 @@ describe('Prompt Caching for Subagents with inheritParentSystemPrompt', () => {
     }
 
     // Mock LLM API to capture messages and end turn immediately
-    spyOn(aisdk, 'promptAiSdkStream').mockImplementation(
-      async function* (options) {
-        // Capture the messages sent to the LLM
-        capturedMessages = options.messages
+    agentRuntimeImpl.promptAiSdkStream = async function* (options) {
+      // Capture the messages sent to the LLM
+      capturedMessages = options.messages
 
-        // Simulate immediate end turn
-        yield {
-          type: 'text' as const,
-          text: 'Test response',
-        }
+      // Simulate immediate end turn
+      yield {
+        type: 'text' as const,
+        text: 'Test response',
+      }
 
-        if (options.onCostCalculated) {
-          await options.onCostCalculated(1)
-        }
+      if (options.onCostCalculated) {
+        await options.onCostCalculated(1)
+      }
 
-        return 'mock-message-id'
-      },
-    )
+      return 'mock-message-id'
+    }
 
     // Mock file operations
-    spyOn(websocketAction, 'requestFiles').mockImplementation(
-      async (params: { ws: any; filePaths: string[] }) => {
-        const results: Record<string, string | null> = {}
-        params.filePaths.forEach((path) => {
-          results[path] = null
-        })
-        return results
-      },
-    )
+    agentRuntimeScopedImpl.requestFiles = async ({ filePaths }) => {
+      const results: Record<string, string | null> = {}
+      filePaths.forEach((path) => {
+        results[path] = null
+      })
+      return results
+    }
 
-    spyOn(websocketAction, 'requestToolCall').mockImplementation(
-      async (ws, userInputId, toolName, input) => {
-        return {
-          output: [
-            {
-              type: 'json',
-              value: { message: 'Success' },
-            },
-          ],
-        }
-      },
-    )
+    agentRuntimeScopedImpl.requestToolCall = async () => ({
+      output: [
+        {
+          type: 'json',
+          value: 'Tool call success',
+        },
+      ],
+    })
 
     // Mock live user input
     const liveUserInputs = require('../live-user-inputs')
@@ -167,19 +146,16 @@ describe('Prompt Caching for Subagents with inheritParentSystemPrompt', () => {
     mock.restore()
   })
 
-  afterAll(() => {
-    clearMockedModules()
-  })
-
   it('should inherit parent system prompt when inheritParentSystemPrompt is true', async () => {
     const sessionState = getInitialSessionState(mockFileContext)
-    const ws = new MockWebSocket() as unknown as WebSocket
 
     // Run parent agent first to establish system prompt
-    const parentResult = await loopAgentSteps(ws, {
+    const parentResult = await loopAgentSteps({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
       userInputId: 'test-parent',
       prompt: 'Parent task',
-      params: undefined,
+      spawnParams: undefined,
       agentType: 'parent',
       agentState: sessionState.mainAgentState,
       fingerprintId: 'test-fingerprint',
@@ -208,10 +184,12 @@ describe('Prompt Caching for Subagents with inheritParentSystemPrompt', () => {
       messageHistory: [],
     }
 
-    await loopAgentSteps(ws, {
+    await loopAgentSteps({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
       userInputId: 'test-child',
       prompt: 'Child task',
-      params: undefined,
+      spawnParams: undefined,
       agentType: 'child',
       agentState: childAgentState,
       fingerprintId: 'test-fingerprint',
@@ -232,7 +210,6 @@ describe('Prompt Caching for Subagents with inheritParentSystemPrompt', () => {
 
   it('should generate own system prompt when inheritParentSystemPrompt is false', async () => {
     const sessionState = getInitialSessionState(mockFileContext)
-    const ws = new MockWebSocket() as unknown as WebSocket
 
     // Create a child agent that does NOT inherit parent system prompt
     const standaloneChild: AgentTemplate = {
@@ -255,10 +232,12 @@ describe('Prompt Caching for Subagents with inheritParentSystemPrompt', () => {
     mockLocalAgentTemplates['standalone-child'] = standaloneChild
 
     // Run parent agent first
-    const parentResult = await loopAgentSteps(ws, {
+    const parentResult = await loopAgentSteps({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
       userInputId: 'test-parent',
       prompt: 'Parent task',
-      params: undefined,
+      spawnParams: undefined,
       agentType: 'parent',
       agentState: sessionState.mainAgentState,
       fingerprintId: 'test-fingerprint',
@@ -281,10 +260,12 @@ describe('Prompt Caching for Subagents with inheritParentSystemPrompt', () => {
       messageHistory: [],
     }
 
-    await loopAgentSteps(ws, {
+    await loopAgentSteps({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
       userInputId: 'test-child',
       prompt: 'Child task',
-      params: undefined,
+      spawnParams: undefined,
       agentType: 'standalone-child',
       agentState: childAgentState,
       fingerprintId: 'test-fingerprint',
@@ -306,7 +287,6 @@ describe('Prompt Caching for Subagents with inheritParentSystemPrompt', () => {
 
   it('should work independently: includeMessageHistory without inheritParentSystemPrompt', async () => {
     const sessionState = getInitialSessionState(mockFileContext)
-    const ws = new MockWebSocket() as unknown as WebSocket
 
     // Create a child that includes message history but uses its own system prompt
     const messageHistoryChild: AgentTemplate = {
@@ -329,10 +309,12 @@ describe('Prompt Caching for Subagents with inheritParentSystemPrompt', () => {
     mockLocalAgentTemplates['message-history-child'] = messageHistoryChild
 
     // Run parent agent first
-    await loopAgentSteps(ws, {
+    await loopAgentSteps({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
       userInputId: 'test-parent',
       prompt: 'Parent task',
-      params: undefined,
+      spawnParams: undefined,
       agentType: 'parent',
       agentState: sessionState.mainAgentState,
       fingerprintId: 'test-fingerprint',
@@ -358,10 +340,12 @@ describe('Prompt Caching for Subagents with inheritParentSystemPrompt', () => {
       ],
     }
 
-    await loopAgentSteps(ws, {
+    await loopAgentSteps({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
       userInputId: 'test-child',
       prompt: 'Child task',
-      params: undefined,
+      spawnParams: undefined,
       agentType: 'message-history-child',
       agentState: childAgentState,
       fingerprintId: 'test-fingerprint',
@@ -429,13 +413,14 @@ describe('Prompt Caching for Subagents with inheritParentSystemPrompt', () => {
 
   it('should enable prompt caching with matching system prompt prefix', async () => {
     const sessionState = getInitialSessionState(mockFileContext)
-    const ws = new MockWebSocket() as unknown as WebSocket
 
     // Run parent agent
-    const parentResult = await loopAgentSteps(ws, {
+    const parentResult = await loopAgentSteps({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
       userInputId: 'test-parent',
       prompt: 'Parent task',
-      params: undefined,
+      spawnParams: undefined,
       agentType: 'parent',
       agentState: sessionState.mainAgentState,
       fingerprintId: 'test-fingerprint',
@@ -458,10 +443,12 @@ describe('Prompt Caching for Subagents with inheritParentSystemPrompt', () => {
       messageHistory: [],
     }
 
-    await loopAgentSteps(ws, {
+    await loopAgentSteps({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
       userInputId: 'test-child',
       prompt: 'Child task',
-      params: undefined,
+      spawnParams: undefined,
       agentType: 'child',
       agentState: childAgentState,
       fingerprintId: 'test-fingerprint',
@@ -487,7 +474,6 @@ describe('Prompt Caching for Subagents with inheritParentSystemPrompt', () => {
 
   it('should support both inheritParentSystemPrompt and includeMessageHistory together', async () => {
     const sessionState = getInitialSessionState(mockFileContext)
-    const ws = new MockWebSocket() as unknown as WebSocket
 
     // Create a child that inherits system prompt AND includes message history
     const fullInheritChild: AgentTemplate = {
@@ -510,10 +496,12 @@ describe('Prompt Caching for Subagents with inheritParentSystemPrompt', () => {
     mockLocalAgentTemplates['full-inherit-child'] = fullInheritChild
 
     // Run parent agent first with some message history
-    const parentResult = await loopAgentSteps(ws, {
+    const parentResult = await loopAgentSteps({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
       userInputId: 'test-parent',
       prompt: 'Parent task',
-      params: undefined,
+      spawnParams: undefined,
       agentType: 'parent',
       agentState: {
         ...sessionState.mainAgentState,
@@ -545,10 +533,12 @@ describe('Prompt Caching for Subagents with inheritParentSystemPrompt', () => {
       ],
     }
 
-    await loopAgentSteps(ws, {
+    await loopAgentSteps({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
       userInputId: 'test-child',
       prompt: 'Child task',
-      params: undefined,
+      spawnParams: undefined,
       agentType: 'full-inherit-child',
       agentState: childAgentState,
       fingerprintId: 'test-fingerprint',

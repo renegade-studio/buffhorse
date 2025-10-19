@@ -1,9 +1,10 @@
 import { models, TEST_USER_ID } from '@codebuff/common/old-constants'
 import { closeXml } from '@codebuff/common/util/xml'
 
-import { promptAiSdk } from '../llm-apis/vercel-ai-sdk/ai-sdk'
-
 import type { Relabel, GetRelevantFilesTrace } from '@codebuff/bigquery'
+import type { PromptAiSdkFn } from '@codebuff/common/types/contracts/llm'
+import type { Logger } from '@codebuff/common/types/contracts/logger'
+import type { ParamsExcluding } from '@codebuff/common/types/function-params'
 
 const PROMPT = `
 You are an evaluator system, measuring how well various models perform at selecting the most relevant files for a given user request.
@@ -96,11 +97,23 @@ function extractResponse(response: string): {
   }
 }
 
-export async function gradeRun(tracesAndRelabels: {
-  trace: GetRelevantFilesTrace
-  relabels: Relabel[]
-}) {
-  const { trace, relabels } = tracesAndRelabels
+export async function gradeRun(
+  params: {
+    trace: GetRelevantFilesTrace
+    relabels: Relabel[]
+    promptAiSdk: PromptAiSdkFn
+    logger: Logger
+  } & ParamsExcluding<
+    PromptAiSdkFn,
+    | 'messages'
+    | 'model'
+    | 'clientSessionId'
+    | 'fingerprintId'
+    | 'userInputId'
+    | 'userId'
+  >,
+) {
+  const { trace, relabels, promptAiSdk, logger } = params
   const messages = trace.payload.messages
 
   const originalOutput = trace.payload.output
@@ -131,6 +144,7 @@ export async function gradeRun(tracesAndRelabels: {
 
   const stringified = JSON.stringify(messages)
   const response = await promptAiSdk({
+    ...params,
     messages: [
       { role: 'system', content: PROMPT },
       {

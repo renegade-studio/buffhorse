@@ -7,13 +7,14 @@ import type {
   AddAgentStepFn,
   FinishAgentRunFn,
   StartAgentRunFn,
-} from '@codebuff/types/database'
+} from '@codebuff/common/types/contracts/database'
+import type { ParamsOf } from '@codebuff/common/types/function-params'
 
 /**
  * Starts a new agent run and creates an entry in the agent_run table
  */
 export async function startAgentRun(
-  params: Parameters<StartAgentRunFn>[0],
+  params: ParamsOf<StartAgentRunFn>,
 ): ReturnType<StartAgentRunFn> {
   const { runId, userId, agentId, ancestorRunIds, logger } = params
   if (userId === TEST_USER_ID) {
@@ -46,7 +47,7 @@ export async function startAgentRun(
  * Completes an agent run by updating its status and metrics
  */
 export async function finishAgentRun(
-  params: Parameters<FinishAgentRunFn>[0],
+  params: ParamsOf<FinishAgentRunFn>,
 ): ReturnType<FinishAgentRunFn> {
   const {
     userId,
@@ -84,7 +85,7 @@ export async function finishAgentRun(
  * Adds a completed step to the agent_step table
  */
 export async function addAgentStep(
-  params: Parameters<AddAgentStepFn>[0],
+  params: ParamsOf<AddAgentStepFn>,
 ): ReturnType<AddAgentStepFn> {
   const {
     userId,

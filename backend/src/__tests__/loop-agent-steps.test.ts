@@ -2,6 +2,10 @@ import * as analytics from '@codebuff/common/analytics'
 import db from '@codebuff/common/db'
 import { TEST_USER_ID } from '@codebuff/common/old-constants'
 import {
+  TEST_AGENT_RUNTIME_IMPL,
+  TEST_AGENT_RUNTIME_SCOPED_IMPL,
+} from '@codebuff/common/testing/impl/agent-runtime'
+import {
   clearMockedModules,
   mockModule,
 } from '@codebuff/common/testing/mock-modules'
@@ -18,27 +22,31 @@ import {
   mock,
   spyOn,
 } from 'bun:test'
+import { z } from 'zod/v4'
 
 import { withAppContext } from '../context/app-context'
 import { loopAgentSteps } from '../run-agent-step'
 import { clearAgentGeneratorCache } from '../run-programmatic-step'
-import { mockFileContext, MockWebSocket } from './test-utils'
-import * as aisdk from '../llm-apis/vercel-ai-sdk/ai-sdk'
+import { mockFileContext } from './test-utils'
 
-import type { AgentTemplate } from '../templates/types'
+import type { AgentTemplate } from '@codebuff/agent-runtime/templates/types'
 import type { StepGenerator } from '@codebuff/common/types/agent-template'
+import type {
+  AgentRuntimeDeps,
+  AgentRuntimeScopedDeps,
+} from '@codebuff/common/types/contracts/agent-runtime'
+import type { ParamsOf } from '@codebuff/common/types/function-params'
 import type { AgentState } from '@codebuff/common/types/session-state'
-import type { WebSocket } from 'ws'
-import { z } from 'zod/v4'
 
 describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => {
   let mockTemplate: AgentTemplate
   let mockAgentState: AgentState
   let llmCallCount: number
+  let agentRuntimeImpl: AgentRuntimeDeps
+  let agentRuntimeScopedImpl: AgentRuntimeScopedDeps
 
   const runLoopAgentStepsWithContext = async (
-    ws: WebSocket,
-    options: Parameters<typeof loopAgentSteps>[1],
+    options: ParamsOf<typeof loopAgentSteps>,
   ) => {
     return await withAppContext(
       {
@@ -49,32 +57,14 @@ describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => 
         currentUserId: options.userId,
         processedRepoId: 'test-repo',
       },
-      async () => loopAgentSteps(ws, options),
+      async () => loopAgentSteps(options),
     )
   }
 
   beforeAll(() => {
-    // Mock logger
-    mockModule('@codebuff/backend/util/logger', () => ({
-      logger: {
-        debug: () => {},
-        error: () => {},
-        info: () => {},
-        warn: () => {},
-      },
-      withLoggerContext: async (context: any, fn: () => Promise<any>) => fn(),
-    }))
-
     // Mock bigquery
     mockModule('@codebuff/bigquery', () => ({
       insertTrace: () => {},
-    }))
-
-    // Mock agent registry
-    mockModule('@codebuff/backend/templates/agent-registry', () => ({
-      getAgentTemplate: async (agentType: string, localTemplates: any) => {
-        return localTemplates[agentType] || mockTemplate
-      },
     }))
 
     // Mock template strings
@@ -100,7 +90,11 @@ describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => 
   })
 
   beforeEach(() => {
-    clearAgentGeneratorCache()
+    agentRuntimeImpl = { ...TEST_AGENT_RUNTIME_IMPL }
+    agentRuntimeScopedImpl = {
+      ...TEST_AGENT_RUNTIME_SCOPED_IMPL,
+      sendAction: () => {},
+    }
 
     llmCallCount = 0
 
@@ -119,14 +113,14 @@ describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => 
       })),
     } as any)
 
-    spyOn(aisdk, 'promptAiSdkStream').mockImplementation(async function* ({}) {
+    agentRuntimeImpl.promptAiSdkStream = async function* ({}) {
       llmCallCount++
       yield {
         type: 'text' as const,
         text: `LLM response\n\n${getToolCallString('end_turn', {})}`,
       }
       return 'mock-message-id'
-    })
+    }
 
     // Mock analytics
     spyOn(analytics, 'initAnalytics').mockImplementation(() => {})
@@ -171,9 +165,9 @@ describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => 
   })
 
   afterEach(() => {
-    clearAgentGeneratorCache()
-
+    clearAgentGeneratorCache(agentRuntimeImpl)
     mock.restore()
+    agentRuntimeImpl = { ...TEST_AGENT_RUNTIME_IMPL }
   })
 
   afterAll(() => {
@@ -204,22 +198,21 @@ describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => 
       'test-agent': mockTemplate,
     }
 
-    const result = await runLoopAgentStepsWithContext(
-      new MockWebSocket() as unknown as WebSocket,
-      {
-        userInputId: 'test-user-input',
-        agentType: 'test-agent',
-        agentState: mockAgentState,
-        prompt: 'Test prompt',
-        params: undefined,
-        fingerprintId: 'test-fingerprint',
-        fileContext: mockFileContext,
-        localAgentTemplates,
-        userId: TEST_USER_ID,
-        clientSessionId: 'test-session',
-        onResponseChunk: () => {},
-      },
-    )
+    const result = await runLoopAgentStepsWithContext({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
+      userInputId: 'test-user-input',
+      agentType: 'test-agent',
+      agentState: mockAgentState,
+      prompt: 'Test prompt',
+      spawnParams: undefined,
+      fingerprintId: 'test-fingerprint',
+      fileContext: mockFileContext,
+      localAgentTemplates,
+      userId: TEST_USER_ID,
+      clientSessionId: 'test-session',
+      onResponseChunk: () => {},
+    })
 
     console.log(`LLM calls made: ${llmCallCount}`)
     console.log(`Step count: ${stepCount}`)
@@ -251,22 +244,21 @@ describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => 
       'test-agent': mockTemplate,
     }
 
-    const result = await runLoopAgentStepsWithContext(
-      new MockWebSocket() as unknown as WebSocket,
-      {
-        userInputId: 'test-user-input',
-        agentType: 'test-agent',
-        agentState: mockAgentState,
-        prompt: 'Test prompt',
-        params: undefined,
-        fingerprintId: 'test-fingerprint',
-        fileContext: mockFileContext,
-        localAgentTemplates,
-        userId: TEST_USER_ID,
-        clientSessionId: 'test-session',
-        onResponseChunk: () => {},
-      },
-    )
+    const result = await runLoopAgentStepsWithContext({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
+      userInputId: 'test-user-input',
+      agentType: 'test-agent',
+      agentState: mockAgentState,
+      prompt: 'Test prompt',
+      spawnParams: undefined,
+      fingerprintId: 'test-fingerprint',
+      fileContext: mockFileContext,
+      localAgentTemplates,
+      userId: TEST_USER_ID,
+      clientSessionId: 'test-session',
+      onResponseChunk: () => {},
+    })
 
     // Should NOT call LLM since the programmatic agent ended with end_turn
     expect(llmCallCount).toBe(0)
@@ -300,22 +292,21 @@ describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => 
       'test-agent': mockTemplate,
     }
 
-    const result = await runLoopAgentStepsWithContext(
-      new MockWebSocket() as unknown as WebSocket,
-      {
-        userInputId: 'test-user-input',
-        agentType: 'test-agent',
-        agentState: mockAgentState,
-        prompt: 'Test execution order',
-        params: undefined,
-        fingerprintId: 'test-fingerprint',
-        fileContext: mockFileContext,
-        localAgentTemplates,
-        userId: TEST_USER_ID,
-        clientSessionId: 'test-session',
-        onResponseChunk: () => {},
-      },
-    )
+    const result = await runLoopAgentStepsWithContext({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
+      userInputId: 'test-user-input',
+      agentType: 'test-agent',
+      agentState: mockAgentState,
+      prompt: 'Test execution order',
+      spawnParams: undefined,
+      fingerprintId: 'test-fingerprint',
+      fileContext: mockFileContext,
+      localAgentTemplates,
+      userId: TEST_USER_ID,
+      clientSessionId: 'test-session',
+      onResponseChunk: () => {},
+    })
 
     // Verify execution order:
     // 1. Programmatic step function was called once (creates generator)
@@ -348,22 +339,21 @@ describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => 
       'test-agent': mockTemplate,
     }
 
-    const result = await runLoopAgentStepsWithContext(
-      new MockWebSocket() as unknown as WebSocket,
-      {
-        userInputId: 'test-user-input',
-        agentType: 'test-agent',
-        agentState: mockAgentState,
-        prompt: 'Test STEP_ALL behavior',
-        params: undefined,
-        fingerprintId: 'test-fingerprint',
-        fileContext: mockFileContext,
-        localAgentTemplates,
-        userId: TEST_USER_ID,
-        clientSessionId: 'test-session',
-        onResponseChunk: () => {},
-      },
-    )
+    const result = await runLoopAgentStepsWithContext({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
+      userInputId: 'test-user-input',
+      agentType: 'test-agent',
+      agentState: mockAgentState,
+      prompt: 'Test STEP_ALL behavior',
+      spawnParams: undefined,
+      fingerprintId: 'test-fingerprint',
+      fileContext: mockFileContext,
+      localAgentTemplates,
+      userId: TEST_USER_ID,
+      clientSessionId: 'test-session',
+      onResponseChunk: () => {},
+    })
 
     expect(stepCount).toBe(1) // Generator function called once
     expect(llmCallCount).toBe(1) // LLM should be called once
@@ -389,22 +379,21 @@ describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => 
       'test-agent': mockTemplate,
     }
 
-    const result = await runLoopAgentStepsWithContext(
-      new MockWebSocket() as unknown as WebSocket,
-      {
-        userInputId: 'test-user-input',
-        agentType: 'test-agent',
-        agentState: mockAgentState,
-        prompt: 'Test no LLM call',
-        params: undefined,
-        fingerprintId: 'test-fingerprint',
-        fileContext: mockFileContext,
-        localAgentTemplates,
-        userId: TEST_USER_ID,
-        clientSessionId: 'test-session',
-        onResponseChunk: () => {},
-      },
-    )
+    const result = await runLoopAgentStepsWithContext({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
+      userInputId: 'test-user-input',
+      agentType: 'test-agent',
+      agentState: mockAgentState,
+      prompt: 'Test no LLM call',
+      spawnParams: undefined,
+      fingerprintId: 'test-fingerprint',
+      fileContext: mockFileContext,
+      localAgentTemplates,
+      userId: TEST_USER_ID,
+      clientSessionId: 'test-session',
+      onResponseChunk: () => {},
+    })
 
     expect(llmCallCount).toBe(0) // No LLM calls should be made
     expect(result.agentState).toBeDefined()
@@ -422,22 +411,21 @@ describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => 
       'test-agent': llmOnlyTemplate,
     }
 
-    const result = await runLoopAgentStepsWithContext(
-      new MockWebSocket() as unknown as WebSocket,
-      {
-        userInputId: 'test-user-input',
-        agentType: 'test-agent',
-        agentState: mockAgentState,
-        prompt: 'Test LLM-only agent',
-        params: undefined,
-        fingerprintId: 'test-fingerprint',
-        fileContext: mockFileContext,
-        localAgentTemplates,
-        userId: TEST_USER_ID,
-        clientSessionId: 'test-session',
-        onResponseChunk: () => {},
-      },
-    )
+    const result = await runLoopAgentStepsWithContext({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
+      userInputId: 'test-user-input',
+      agentType: 'test-agent',
+      agentState: mockAgentState,
+      prompt: 'Test LLM-only agent',
+      spawnParams: undefined,
+      fingerprintId: 'test-fingerprint',
+      fileContext: mockFileContext,
+      localAgentTemplates,
+      userId: TEST_USER_ID,
+      clientSessionId: 'test-session',
+      onResponseChunk: () => {},
+    })
 
     expect(llmCallCount).toBe(1) // LLM should be called once
     expect(result.agentState).toBeDefined()
@@ -457,22 +445,21 @@ describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => 
       'test-agent': mockTemplate,
     }
 
-    const result = await runLoopAgentStepsWithContext(
-      new MockWebSocket() as unknown as WebSocket,
-      {
-        userInputId: 'test-user-input',
-        agentType: 'test-agent',
-        agentState: mockAgentState,
-        prompt: 'Test error handling',
-        params: undefined,
-        fingerprintId: 'test-fingerprint',
-        fileContext: mockFileContext,
-        localAgentTemplates,
-        userId: TEST_USER_ID,
-        clientSessionId: 'test-session',
-        onResponseChunk: () => {},
-      },
-    )
+    const result = await runLoopAgentStepsWithContext({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
+      userInputId: 'test-user-input',
+      agentType: 'test-agent',
+      agentState: mockAgentState,
+      prompt: 'Test error handling',
+      spawnParams: undefined,
+      fingerprintId: 'test-fingerprint',
+      fileContext: mockFileContext,
+      localAgentTemplates,
+      userId: TEST_USER_ID,
+      clientSessionId: 'test-session',
+      onResponseChunk: () => {},
+    })
 
     // After programmatic step error, should end turn and not call LLM
     expect(llmCallCount).toBe(0)
@@ -509,27 +496,27 @@ describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => 
       'test-agent': mockTemplate,
     }
 
-    const result = await runLoopAgentStepsWithContext(
-      new MockWebSocket() as unknown as WebSocket,
-      {
-        userInputId: 'test-user-input',
-        agentType: 'test-agent',
-        agentState: mockAgentState,
-        prompt: 'Test multiple STEP interactions',
-        params: undefined,
-        fingerprintId: 'test-fingerprint',
-        fileContext: mockFileContext,
-        localAgentTemplates,
-        userId: TEST_USER_ID,
-        clientSessionId: 'test-session',
-        onResponseChunk: () => {},
-      },
-    )
+    const result = await runLoopAgentStepsWithContext({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
+      userInputId: 'test-user-input',
+      agentType: 'test-agent',
+      agentState: mockAgentState,
+      prompt: 'Test multiple STEP interactions',
+      spawnParams: undefined,
+      fingerprintId: 'test-fingerprint',
+      fileContext: mockFileContext,
+      localAgentTemplates,
+      userId: TEST_USER_ID,
+      clientSessionId: 'test-session',
+      onResponseChunk: () => {},
+    })
 
     expect(stepCount).toBe(1) // Generator function called once
     expect(llmCallCount).toBe(1) // LLM called once after STEP
     expect(result.agentState).toBeDefined()
   })
+
   it('should pass shouldEndTurn: true as stepsComplete when end_turn tool is called', async () => {
     // Test that when LLM calls end_turn, shouldEndTurn is correctly passed to runProgrammaticStep
 
@@ -539,13 +526,19 @@ describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => 
     const mockedRunProgrammaticStep = await mockModule(
       '@codebuff/backend/run-programmatic-step',
       () => ({
-        runProgrammaticStep: async (agentState: any, options: any) => {
-          runProgrammaticStepCalls.push({ agentState, options })
-          // Return default behavior
-          return { agentState, endTurn: false }
+        runProgrammaticStep: async (params: any) => {
+          runProgrammaticStepCalls.push(params)
+          // First call: return endTurn false to continue
+          // Second call: return endTurn true to end the loop
+          const shouldEnd = runProgrammaticStepCalls.length >= 2
+          return {
+            agentState: params.agentState,
+            endTurn: shouldEnd,
+            stepNumber: params.stepNumber,
+          }
         },
         clearAgentGeneratorCache: () => {},
-        agentIdToStepAll: new Set(),
+        runIdToStepAll: new Set(),
       }),
     )
 
@@ -559,22 +552,21 @@ describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => 
       'test-agent': mockTemplate,
     }
 
-    await runLoopAgentStepsWithContext(
-      new MockWebSocket() as unknown as WebSocket,
-      {
-        userInputId: 'test-user-input',
-        agentType: 'test-agent',
-        agentState: mockAgentState,
-        prompt: 'Test shouldEndTurn to stepsComplete flow',
-        params: undefined,
-        fingerprintId: 'test-fingerprint',
-        fileContext: mockFileContext,
-        localAgentTemplates,
-        userId: TEST_USER_ID,
-        clientSessionId: 'test-session',
-        onResponseChunk: () => {},
-      },
-    )
+    await runLoopAgentStepsWithContext({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
+      userInputId: 'test-user-input',
+      agentType: 'test-agent',
+      agentState: mockAgentState,
+      prompt: 'Test shouldEndTurn to stepsComplete flow',
+      spawnParams: undefined,
+      fingerprintId: 'test-fingerprint',
+      fileContext: mockFileContext,
+      localAgentTemplates,
+      userId: TEST_USER_ID,
+      clientSessionId: 'test-session',
+      onResponseChunk: () => {},
+    })
 
     mockedRunProgrammaticStep.clear()
 
@@ -584,10 +576,76 @@ describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => 
     expect(runProgrammaticStepCalls).toHaveLength(2)
 
     // First call should have stepsComplete: false
-    expect(runProgrammaticStepCalls[0].options.stepsComplete).toBe(false)
+    expect(runProgrammaticStepCalls[0].stepsComplete).toBe(false)
 
     // Second call should have stepsComplete: true (after end_turn tool was called)
-    expect(runProgrammaticStepCalls[1].options.stepsComplete).toBe(true)
+    expect(runProgrammaticStepCalls[1].stepsComplete).toBe(true)
+  })
+
+  it('should continue loop when handleSteps returns endTurn: false even if LLM calls end_turn', async () => {
+    // Test that handleSteps endTurn: false takes precedence over LLM end_turn tool call
+
+    let programmaticStepCount = 0
+    let llmStepCount = 0
+
+    const mockGeneratorFunction = function* () {
+      // First iteration: return endTurn: false
+      programmaticStepCount++
+      yield 'STEP'
+
+      // Second iteration: also return endTurn: false
+      programmaticStepCount++
+      yield 'STEP'
+
+      // Third iteration: finally return endTurn: true to end the loop
+      programmaticStepCount++
+      yield { toolName: 'end_turn', input: {} }
+    } as () => StepGenerator
+
+    mockTemplate.handleSteps = mockGeneratorFunction
+
+    const localAgentTemplates = {
+      'test-agent': mockTemplate,
+    }
+
+    // Mock LLM to always call end_turn, but handleSteps should override it
+    let promptCallCount = 0
+    agentRuntimeImpl.promptAiSdkStream = async function* () {
+      promptCallCount++
+      llmStepCount++
+
+      // LLM always tries to end turn
+      yield {
+        type: 'text' as const,
+        text: `LLM response\n\n${getToolCallString('end_turn', {})}`,
+      }
+      return `mock-message-id-${promptCallCount}`
+    }
+
+    await runLoopAgentStepsWithContext({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
+      userInputId: 'test-user-input',
+      agentType: 'test-agent',
+      agentState: mockAgentState,
+      prompt: 'Test handleSteps endTurn override',
+      spawnParams: undefined,
+      fingerprintId: 'test-fingerprint',
+      fileContext: mockFileContext,
+      localAgentTemplates,
+      userId: TEST_USER_ID,
+      clientSessionId: 'test-session',
+      onResponseChunk: () => {},
+    })
+
+    // Verify handleSteps ran 3 times (yielded STEP twice, then end_turn)
+    expect(programmaticStepCount).toBe(3)
+
+    // Verify LLM was called 2 times (once per STEP yield)
+    expect(llmStepCount).toBe(2)
+
+    // This confirms that even though LLM called end_turn every time,
+    // the loop continued because handleSteps kept yielding STEP before finally ending
   })
 
   it('should restart loop when agent finishes without setting required output', async () => {
@@ -613,7 +671,7 @@ describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => 
     let llmCallNumber = 0
     let capturedAgentState: AgentState | null = null
 
-    spyOn(aisdk, 'promptAiSdkStream').mockImplementation(async function* ({}) {
+    agentRuntimeImpl.promptAiSdkStream = async function* ({}) {
       llmCallNumber++
       if (llmCallNumber === 1) {
         // First call: agent tries to end turn without setting output
@@ -642,27 +700,26 @@ describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => 
         }
       }
       return 'mock-message-id'
-    })
+    }
 
     mockAgentState.output = undefined
     capturedAgentState = mockAgentState
 
-    const result = await runLoopAgentStepsWithContext(
-      new MockWebSocket() as unknown as WebSocket,
-      {
-        userInputId: 'test-user-input',
-        agentType: 'test-agent',
-        agentState: mockAgentState,
-        prompt: 'Test output schema validation',
-        params: undefined,
-        fingerprintId: 'test-fingerprint',
-        fileContext: mockFileContext,
-        localAgentTemplates,
-        userId: TEST_USER_ID,
-        clientSessionId: 'test-session',
-        onResponseChunk: () => {},
-      },
-    )
+    const result = await runLoopAgentStepsWithContext({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
+      userInputId: 'test-user-input',
+      agentType: 'test-agent',
+      agentState: mockAgentState,
+      prompt: 'Test output schema validation',
+      spawnParams: undefined,
+      fingerprintId: 'test-fingerprint',
+      fileContext: mockFileContext,
+      localAgentTemplates,
+      userId: TEST_USER_ID,
+      clientSessionId: 'test-session',
+      onResponseChunk: () => {},
+    })
 
     // Should call LLM twice: once to try ending without output, once after reminder
     expect(llmCallNumber).toBe(2)
@@ -705,7 +762,7 @@ describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => 
     let llmCallNumber = 0
     let capturedAgentState: AgentState | null = null
 
-    spyOn(aisdk, 'promptAiSdkStream').mockImplementation(async function* ({}) {
+    agentRuntimeImpl.promptAiSdkStream = async function* ({}) {
       llmCallNumber++
       // Agent sets output correctly on first call
       if (capturedAgentState) {
@@ -716,27 +773,26 @@ describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => 
         text: `Setting output\n\n${getToolCallString('set_output', { result: 'success' })}\n\n${getToolCallString('end_turn', {})}`,
       }
       return 'mock-message-id'
-    })
+    }
 
     mockAgentState.output = undefined
     capturedAgentState = mockAgentState
 
-    const result = await runLoopAgentStepsWithContext(
-      new MockWebSocket() as unknown as WebSocket,
-      {
-        userInputId: 'test-user-input',
-        agentType: 'test-agent',
-        agentState: mockAgentState,
-        prompt: 'Test with correct output',
-        params: undefined,
-        fingerprintId: 'test-fingerprint',
-        fileContext: mockFileContext,
-        localAgentTemplates,
-        userId: TEST_USER_ID,
-        clientSessionId: 'test-session',
-        onResponseChunk: () => {},
-      },
-    )
+    const result = await runLoopAgentStepsWithContext({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
+      userInputId: 'test-user-input',
+      agentType: 'test-agent',
+      agentState: mockAgentState,
+      prompt: 'Test with correct output',
+      spawnParams: undefined,
+      fingerprintId: 'test-fingerprint',
+      fileContext: mockFileContext,
+      localAgentTemplates,
+      userId: TEST_USER_ID,
+      clientSessionId: 'test-session',
+      onResponseChunk: () => {},
+    })
 
     // Should only call LLM once since output was set correctly
     expect(llmCallNumber).toBe(1)
@@ -759,31 +815,30 @@ describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => 
     }
 
     let llmCallNumber = 0
-    spyOn(aisdk, 'promptAiSdkStream').mockImplementation(async function* ({}) {
+    agentRuntimeImpl.promptAiSdkStream = async function* ({}) {
       llmCallNumber++
       yield {
         type: 'text' as const,
         text: `Response without output\n\n${getToolCallString('end_turn', {})}`,
       }
       return 'mock-message-id'
-    })
+    }
 
-    const result = await runLoopAgentStepsWithContext(
-      new MockWebSocket() as unknown as WebSocket,
-      {
-        userInputId: 'test-user-input',
-        agentType: 'test-agent',
-        agentState: mockAgentState,
-        prompt: 'Test without output schema',
-        params: undefined,
-        fingerprintId: 'test-fingerprint',
-        fileContext: mockFileContext,
-        localAgentTemplates,
-        userId: TEST_USER_ID,
-        clientSessionId: 'test-session',
-        onResponseChunk: () => {},
-      },
-    )
+    const result = await runLoopAgentStepsWithContext({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
+      userInputId: 'test-user-input',
+      agentType: 'test-agent',
+      agentState: mockAgentState,
+      prompt: 'Test without output schema',
+      spawnParams: undefined,
+      fingerprintId: 'test-fingerprint',
+      fileContext: mockFileContext,
+      localAgentTemplates,
+      userId: TEST_USER_ID,
+      clientSessionId: 'test-session',
+      onResponseChunk: () => {},
+    })
 
     // Should only call LLM once and end normally
     expect(llmCallNumber).toBe(1)
@@ -813,7 +868,7 @@ describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => 
     let llmCallNumber = 0
     let capturedAgentState: AgentState | null = null
 
-    spyOn(aisdk, 'promptAiSdkStream').mockImplementation(async function* ({}) {
+    agentRuntimeImpl.promptAiSdkStream = async function* ({}) {
       llmCallNumber++
       if (llmCallNumber === 1) {
         // First call: agent does some work but doesn't end turn
@@ -832,27 +887,26 @@ describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => 
         }
       }
       return 'mock-message-id'
-    })
+    }
 
     mockAgentState.output = undefined
     capturedAgentState = mockAgentState
 
-    const result = await runLoopAgentStepsWithContext(
-      new MockWebSocket() as unknown as WebSocket,
-      {
-        userInputId: 'test-user-input',
-        agentType: 'test-agent',
-        agentState: mockAgentState,
-        prompt: 'Test loop continues',
-        params: undefined,
-        fingerprintId: 'test-fingerprint',
-        fileContext: mockFileContext,
-        localAgentTemplates,
-        userId: TEST_USER_ID,
-        clientSessionId: 'test-session',
-        onResponseChunk: () => {},
-      },
-    )
+    const result = await runLoopAgentStepsWithContext({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
+      userInputId: 'test-user-input',
+      agentType: 'test-agent',
+      agentState: mockAgentState,
+      prompt: 'Test loop continues',
+      spawnParams: undefined,
+      fingerprintId: 'test-fingerprint',
+      fileContext: mockFileContext,
+      localAgentTemplates,
+      userId: TEST_USER_ID,
+      clientSessionId: 'test-session',
+      onResponseChunk: () => {},
+    })
 
     // Should call LLM twice: once for work, once to set output and end
     expect(llmCallNumber).toBe(2)

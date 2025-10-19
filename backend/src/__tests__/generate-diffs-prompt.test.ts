@@ -1,3 +1,4 @@
+import { TEST_AGENT_RUNTIME_IMPL } from '@codebuff/common/testing/impl/agent-runtime'
 import { expect, describe, it } from 'bun:test'
 
 import { parseAndGetDiffBlocksSingleFile } from '../generate-diffs-prompt'
@@ -16,7 +17,11 @@ function test() {
 }
 >>>>>>> REPLACE`
 
-    const result = parseAndGetDiffBlocksSingleFile(newContent, oldContent)
+    const result = parseAndGetDiffBlocksSingleFile({
+      ...TEST_AGENT_RUNTIME_IMPL,
+      newContent,
+      oldFileContent: oldContent,
+    })
     console.log(JSON.stringify({ result }))
 
     expect(result.diffBlocks.length).toBe(1)
@@ -41,7 +46,11 @@ function test() {
   return true;
 }>>>>>>> REPLACE`
 
-    const result = parseAndGetDiffBlocksSingleFile(newContent, oldContent)
+    const result = parseAndGetDiffBlocksSingleFile({
+      ...TEST_AGENT_RUNTIME_IMPL,
+      newContent,
+      oldFileContent: oldContent,
+    })
 
     expect(result.diffBlocks.length).toBe(1)
     expect(result.diffBlocksThatDidntMatch.length).toBe(0)
@@ -90,7 +99,11 @@ function subtract(a, b) {
 }
 >>>>>>> REPLACE`
 
-    const result = parseAndGetDiffBlocksSingleFile(newContent, oldContent)
+    const result = parseAndGetDiffBlocksSingleFile({
+      ...TEST_AGENT_RUNTIME_IMPL,
+      newContent,
+      oldFileContent: oldContent,
+    })
 
     expect(result.diffBlocks.length).toBe(2)
     expect(result.diffBlocksThatDidntMatch.length).toBe(0)
@@ -114,7 +127,11 @@ function subtract(a, b) {
 =======
 >>>>>>> REPLACE`
 
-    const result = parseAndGetDiffBlocksSingleFile(newContent, oldContent)
+    const result = parseAndGetDiffBlocksSingleFile({
+      ...TEST_AGENT_RUNTIME_IMPL,
+      newContent,
+      oldFileContent: oldContent,
+    })
 
     expect(result.diffBlocks.length).toBe(1)
     expect(result.diffBlocksThatDidntMatch.length).toBe(0)

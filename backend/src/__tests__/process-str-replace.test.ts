@@ -1,13 +1,14 @@
-import {
-  describe,
-  expect,
-  it,
-  spyOn,
-  beforeEach,
-  afterEach,
-  mock,
-} from 'bun:test'
+import { TEST_AGENT_RUNTIME_SCOPED_IMPL } from '@codebuff/common/testing/impl/agent-runtime'
+import { describe, expect, it, mock } from 'bun:test'
 import { applyPatch } from 'diff'
+
+import { processStrReplace } from '../process-str-replace'
+import {
+  executeBatchStrReplaces,
+  benchifyCanFixLanguage,
+} from '../tools/batch-str-replace'
+
+import type { Logger } from '@codebuff/common/types/contracts/logger'
 
 // Mock the benchify module to simulate missing API key
 mock.module('benchify', () => ({
@@ -19,12 +20,12 @@ mock.module('benchify', () => ({
   },
 }))
 
-import { processStrReplace } from '../process-str-replace'
-import { mockFileContext } from './test-utils'
-import {
-  executeBatchStrReplaces,
-  benchifyCanFixLanguage,
-} from '../tools/batch-str-replace'
+const logger: Logger = {
+  debug: () => {},
+  info: () => {},
+  warn: () => {},
+  error: () => {},
+}
 
 describe('processStrReplace', () => {
   it('should replace exact string matches', async () => {
@@ -36,6 +37,7 @@ describe('processStrReplace', () => {
       path: 'test.ts',
       replacements: [{ old: oldStr, new: newStr, allowMultiple: false }],
       initialContentPromise: Promise.resolve(initialContent),
+      logger,
     })
 
     expect(result).not.toBeNull()
@@ -56,6 +58,7 @@ describe('processStrReplace', () => {
       path: 'test.ts',
       replacements: [{ old: oldStr, new: newStr, allowMultiple: false }],
       initialContentPromise: Promise.resolve(initialContent),
+      logger,
     })
 
     expect(result).not.toBeNull()
@@ -75,6 +78,7 @@ describe('processStrReplace', () => {
       path: 'test.ts',
       replacements: [{ old: oldStr, new: newStr, allowMultiple: false }],
       initialContentPromise: Promise.resolve(initialContent),
+      logger,
     })
 
     expect(result).not.toBeNull()
@@ -93,6 +97,7 @@ describe('processStrReplace', () => {
       path: 'test.ts',
       replacements: [{ old: oldStr, new: newStr, allowMultiple: false }],
       initialContentPromise: Promise.resolve(initialContent),
+      logger,
     })
 
     expect(result).not.toBeNull()
@@ -107,6 +112,7 @@ describe('processStrReplace', () => {
       path: 'test.ts',
       replacements: [{ old: 'old', new: 'new', allowMultiple: false }],
       initialContentPromise: Promise.resolve(null),
+      logger,
     })
 
     expect(result).not.toBeNull()
@@ -121,6 +127,7 @@ describe('processStrReplace', () => {
       path: 'test.ts',
       replacements: [{ old: '', new: 'new', allowMultiple: false }],
       initialContentPromise: Promise.resolve('content'),
+      logger,
     })
 
     expect(result).not.toBeNull()
@@ -139,6 +146,7 @@ describe('processStrReplace', () => {
       path: 'test.ts',
       replacements: [{ old: oldStr, new: newStr, allowMultiple: false }],
       initialContentPromise: Promise.resolve(initialContent),
+      logger,
     })
 
     expect(result).not.toBeNull()
@@ -159,6 +167,7 @@ describe('processStrReplace', () => {
       path: 'test.ts',
       replacements: [{ old: oldStr, new: newStr, allowMultiple: true }],
       initialContentPromise: Promise.resolve(initialContent),
+      logger,
     })
 
     expect(result).not.toBeNull()
@@ -177,6 +186,7 @@ describe('processStrReplace', () => {
       path: 'test.ts',
       replacements: [{ old: oldStr, new: newStr, allowMultiple: false }],
       initialContentPromise: Promise.resolve(initialContent),
+      logger,
     })
 
     expect(result).not.toBeNull()
@@ -198,6 +208,7 @@ describe('processStrReplace', () => {
       path: 'test.ts',
       replacements: [{ old: oldStr, new: newStr, allowMultiple: false }],
       initialContentPromise: Promise.resolve(initialContent),
+      logger,
     })
 
     expect(result).not.toBeNull()
@@ -221,6 +232,7 @@ describe('processStrReplace', () => {
       path: 'test.ts',
       replacements,
       initialContentPromise: Promise.resolve(initialContent),
+      logger,
     })
 
     expect(result).not.toBeNull()
@@ -245,6 +257,7 @@ describe('processStrReplace', () => {
       path: 'test.ts',
       replacements: [{ old: oldStr, new: newStr, allowMultiple: false }],
       initialContentPromise: Promise.resolve(initialContent),
+      logger,
     })
 
     expect(result).not.toBeNull()
@@ -266,6 +279,7 @@ describe('processStrReplace', () => {
         path: 'test.ts',
         replacements: [{ old: oldStr, new: newStr, allowMultiple: false }],
         initialContentPromise: Promise.resolve(initialContent),
+        logger,
       })
 
       expect(result).not.toBeNull()
@@ -285,6 +299,7 @@ describe('processStrReplace', () => {
         path: 'test.ts',
         replacements: [{ old: oldStr, new: newStr, allowMultiple: true }],
         initialContentPromise: Promise.resolve(initialContent),
+        logger,
       })
 
       expect(result).not.toBeNull()
@@ -303,6 +318,7 @@ describe('processStrReplace', () => {
         path: 'test.ts',
         replacements: [{ old: oldStr, new: newStr, allowMultiple: true }],
         initialContentPromise: Promise.resolve(initialContent),
+        logger,
       })
 
       expect(result).not.toBeNull()
@@ -324,6 +340,7 @@ describe('processStrReplace', () => {
         path: 'test.ts',
         replacements,
         initialContentPromise: Promise.resolve(initialContent),
+        logger,
       })
 
       expect(result).not.toBeNull()
@@ -355,6 +372,7 @@ function test3() {
         path: 'test.ts',
         replacements: [{ old: oldStr, new: newStr, allowMultiple: true }],
         initialContentPromise: Promise.resolve(initialContent),
+        logger,
       })
 
       expect(result).not.toBeNull()
@@ -378,6 +396,7 @@ function test3() {
         path: 'test.ts',
         replacements: [{ old: oldStr, new: newStr, allowMultiple: true }],
         initialContentPromise: Promise.resolve(initialContent),
+        logger,
       })
 
       expect(result).not.toBeNull()
@@ -401,6 +420,7 @@ function test3() {
         path: 'test.ts',
         replacements: [{ old: oldStr, new: newStr, allowMultiple: true }],
         initialContentPromise: Promise.resolve(initialContent),
+        logger,
       })
 
       expect(result).not.toBeNull()
@@ -420,6 +440,7 @@ function test3() {
         path: 'test.ts',
         replacements: [{ old: oldStr, new: newStr, allowMultiple: true }],
         initialContentPromise: Promise.resolve(initialContent),
+        logger,
       })
 
       expect(result).not.toBeNull()
@@ -451,6 +472,7 @@ function test3() {
       path: 'test.ts',
       replacements,
       initialContentPromise: Promise.resolve(initialContent),
+      logger,
     })
 
     expect('content' in result).toBe(true)
@@ -510,6 +532,7 @@ describe('Benchify resilience', () => {
 
     try {
       const result = await executeBatchStrReplaces({
+        ...TEST_AGENT_RUNTIME_SCOPED_IMPL,
         deferredStrReplaces: [
           {
             toolCall: {
@@ -526,13 +549,13 @@ describe('Benchify resilience', () => {
         ],
         toolCalls: [],
         toolResults: [],
-        ws: {} as any,
         agentStepId: 'test-step',
         clientSessionId: 'test-session',
         userInputId: 'test-input',
         onResponseChunk: () => {},
         state: { messages: [] },
         userId: 'test-user',
+        logger,
       })
 
       // Should complete without error even when Benchify is unavailable
@@ -550,16 +573,17 @@ describe('Benchify resilience', () => {
       // Simple test that doesn't require complex mocking
       expect(
         executeBatchStrReplaces({
+          ...TEST_AGENT_RUNTIME_SCOPED_IMPL,
           deferredStrReplaces: [],
           toolCalls: [],
           toolResults: [],
-          ws: {} as any,
           agentStepId: 'test-step',
           clientSessionId: 'test-session',
           userInputId: 'test-input',
           onResponseChunk: () => {},
           state: { messages: [] },
           userId: 'test-user',
+          logger,
         }),
       ).resolves.toBeUndefined() // Should complete without throwing
     })
@@ -587,16 +611,17 @@ describe('Benchify resilience', () => {
   it('should handle executeBatchStrReplaces with empty list', async () => {
     // Simple test that doesn't require complex mocking
     const result = await executeBatchStrReplaces({
+      ...TEST_AGENT_RUNTIME_SCOPED_IMPL,
       deferredStrReplaces: [],
       toolCalls: [],
       toolResults: [],
-      ws: {} as any,
       agentStepId: 'test-step',
       clientSessionId: 'test-session',
       userInputId: 'test-input',
       onResponseChunk: () => {},
       state: { messages: [] },
       userId: 'test-user',
+      logger,
     })
 
     // Should complete without throwing an error

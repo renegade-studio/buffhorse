@@ -7,44 +7,59 @@ import {
   createAgentState,
 } from './spawn-agent-utils'
 
-import type { CodebuffToolHandlerFunction } from '../handler-function-type'
+import type { CodebuffToolHandlerFunction } from '@codebuff/agent-runtime/tools/handlers/handler-function-type'
 import type {
   CodebuffToolCall,
   CodebuffToolOutput,
 } from '@codebuff/common/tools/list'
 import type { AgentTemplate } from '@codebuff/common/types/agent-template'
+import type { Logger } from '@codebuff/common/types/contracts/logger'
+import type { ParamsExcluding } from '@codebuff/common/types/function-params'
 import type { Message } from '@codebuff/common/types/messages/codebuff-message'
 import type { PrintModeEvent } from '@codebuff/common/types/print-mode'
 import type { AgentState } from '@codebuff/common/types/session-state'
 import type { ProjectFileContext } from '@codebuff/common/util/file'
-import type { WebSocket } from 'ws'
 
 type ToolName = 'spawn_agent_inline'
-export const handleSpawnAgentInline = ((params: {
-  previousToolCallFinished: Promise<void>
-  toolCall: CodebuffToolCall<ToolName>
-  fileContext: ProjectFileContext
-  clientSessionId: string
-  userInputId: string
-  writeToClient: (chunk: string | PrintModeEvent) => void
+export const handleSpawnAgentInline = ((
+  params: {
+    previousToolCallFinished: Promise<void>
+    toolCall: CodebuffToolCall<ToolName>
+    fileContext: ProjectFileContext
+    clientSessionId: string
+    userInputId: string
+    writeToClient: (chunk: string | PrintModeEvent) => void
 
-  getLatestState: () => { messages: Message[] }
-  state: {
-    ws?: WebSocket
-    fingerprintId?: string
-    userId?: string
-    agentTemplate?: AgentTemplate
-    localAgentTemplates?: Record<string, AgentTemplate>
-    messages?: Message[]
-    agentState?: AgentState
-    system?: string
-  }
-}): { result: Promise<CodebuffToolOutput<ToolName>>; state: {} } => {
+    getLatestState: () => { messages: Message[] }
+    state: {
+      fingerprintId?: string
+      userId?: string
+      agentTemplate?: AgentTemplate
+      localAgentTemplates?: Record<string, AgentTemplate>
+      messages?: Message[]
+      agentState?: AgentState
+      system?: string
+    }
+    logger: Logger
+  } & ParamsExcluding<
+    typeof executeSubagent,
+    | 'userInputId'
+    | 'prompt'
+    | 'spawnParams'
+    | 'agentTemplate'
+    | 'parentAgentState'
+    | 'agentState'
+    | 'localAgentTemplates'
+    | 'userId'
+    | 'parentSystemPrompt'
+    | 'onResponseChunk'
+    | 'clearUserPromptMessagesAfterResponse'
+    | 'fingerprintId'
+  >,
+): { result: Promise<CodebuffToolOutput<ToolName>>; state: {} } => {
   const {
     previousToolCallFinished,
     toolCall,
-    fileContext,
-    clientSessionId,
     userInputId,
     getLatestState,
     state,
@@ -53,10 +68,9 @@ export const handleSpawnAgentInline = ((params: {
   const {
     agent_type: agentTypeStr,
     prompt,
-    params: agentParams,
+    params: spawnParams,
   } = toolCall.input
   const {
-    ws,
     fingerprintId,
     userId,
     agentTemplate: parentAgentTemplate,
@@ -66,13 +80,14 @@ export const handleSpawnAgentInline = ((params: {
   } = validateSpawnState(state, 'spawn_agent_inline')
 
   const triggerSpawnAgentInline = async () => {
-    const { agentTemplate, agentType } = await validateAndGetAgentTemplate(
+    const { agentTemplate, agentType } = await validateAndGetAgentTemplate({
+      ...params,
       agentTypeStr,
       parentAgentTemplate,
       localAgentTemplates,
-    )
+    })
 
-    validateAgentInput(agentTemplate, agentType, prompt, agentParams)
+    validateAgentInput(agentTemplate, agentType, prompt, spawnParams)
 
     // Create child agent state that shares message history with parent
     const childAgentState: AgentState = createAgentState(
@@ -83,34 +98,34 @@ export const handleSpawnAgentInline = ((params: {
       parentAgentState.agentContext,
     )
 
-    logAgentSpawn(
+    logAgentSpawn({
+      ...params,
       agentTemplate,
       agentType,
-      childAgentState.agentId,
-      childAgentState.parentId,
+      agentId: childAgentState.agentId,
+      parentId: childAgentState.parentId,
       prompt,
-      agentParams,
-      true, // inline = true
-    )
+      spawnParams,
+      inline: true,
+    })
 
     const result = await executeSubagent({
-      ws,
+      ...params,
       userInputId: `${userInputId}-inline-${agentType}${childAgentState.agentId}`,
       prompt: prompt || '',
-      params: agentParams,
+      spawnParams,
       agentTemplate,
       parentAgentState,
       agentState: childAgentState,
-      fingerprintId,
-      fileContext,
       localAgentTemplates,
       userId,
-      clientSessionId,
+      fingerprintId,
       parentSystemPrompt: system,
       onResponseChunk: (chunk) => {
-        // Disabled.
-        // Inherits parent's onResponseChunk
-        // writeToClient(chunk)
+        // Inherits parent's onResponseChunk, except for context-pruner (TODO: add an option for it to be silent?)
+        if (agentType !== 'context-pruner') {
+          writeToClient(chunk)
+        }
       },
       clearUserPromptMessagesAfterResponse: false,
     })

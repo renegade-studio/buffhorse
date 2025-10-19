@@ -1,5 +1,5 @@
+import { countTokens } from '@codebuff/agent-runtime/util/token-counter'
 import { promptAiSdkStructured } from '@codebuff/backend/llm-apis/vercel-ai-sdk/ai-sdk'
-import { countTokens } from '@codebuff/backend/util/token-counter'
 import { models } from '@codebuff/common/old-constants'
 import { generateCompactId } from '@codebuff/common/util/string'
 import { createPatch } from 'diff'
@@ -193,6 +193,8 @@ export async function judgeEvalRun(evalRun: EvalRunLog) {
       userInputId: generateCompactId(),
       userId: undefined,
       timeout: 10 * 60 * 1000, // 10 minute timeout
+      sendAction: () => {},
+      logger: console,
     }).catch((error) => {
       console.warn(`Judge ${index + 1} failed:`, error)
       return null

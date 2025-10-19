@@ -1,11 +1,11 @@
+import { messagesWithSystem } from '@codebuff/agent-runtime/util/messages'
 import { promptFlashWithFallbacks } from '@codebuff/backend/llm-apis/gemini-with-fallbacks'
 import { promptAiSdk } from '@codebuff/backend/llm-apis/vercel-ai-sdk/ai-sdk'
-import { messagesWithSystem } from '@codebuff/backend/util/messages'
 import { getTracesWithoutRelabels, insertRelabel } from '@codebuff/bigquery'
 import { models, TEST_USER_ID } from '@codebuff/common/old-constants'
 import { generateCompactId } from '@codebuff/common/util/string'
 
-import type { System } from '../../backend/src/llm-apis/claude'
+import type { System } from '@codebuff/agent-runtime/llm-api/claude'
 import type { GetRelevantFilesPayload } from '@codebuff/bigquery'
 import type { Message } from '@codebuff/common/types/messages/codebuff-message'
 
@@ -67,22 +67,25 @@ async function runTraces() {
                   fingerprintId: 'relabel-trace-run',
                   userInputId: 'relabel-trace-run',
                   userId: TEST_USER_ID,
+                  sendAction: () => {},
+                  logger: console,
                 })
               } else {
-                output = await promptFlashWithFallbacks(
-                  messagesWithSystem({
+                output = await promptFlashWithFallbacks({
+                  messages: messagesWithSystem({
                     messages: messages as Message[],
                     system: system as System,
                   }),
-                  {
-                    model:
-                      model as typeof models.openrouter_gemini2_5_pro_preview,
-                    clientSessionId: 'relabel-trace-run',
-                    fingerprintId: 'relabel-trace-run',
-                    userInputId: 'relabel-trace-run',
-                    userId: 'relabel-trace-run',
-                  },
-                )
+                  model:
+                    model as typeof models.openrouter_gemini2_5_pro_preview,
+                  clientSessionId: 'relabel-trace-run',
+                  fingerprintId: 'relabel-trace-run',
+                  userInputId: 'relabel-trace-run',
+                  userId: 'relabel-trace-run',
+                  logger: console,
+                  sendAction: () => {},
+                  promptAiSdk,
+                })
               }
 
               // Create relabel record

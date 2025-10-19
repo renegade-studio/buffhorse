@@ -17,7 +17,7 @@ export const codeSearchParams = {
         .string()
         .optional()
         .describe(
-          `Optional ripgrep flags to customize the search (e.g., "-i" for case-insensitive, "-t ts" for TypeScript files only, "-A 3" for 3 lines after match, "-B 2" for 2 lines before match, "--type-not test" to exclude test files).`,
+          `Optional ripgrep flags to customize the search (e.g., "-i" for case-insensitive, "-t ts -t js" for TypeScript and JavaScript files only, "-A 3" for 3 lines after match, "-B 2" for 2 lines before match, "--type-not py" to exclude Python files).`,
         ),
       cwd: z
         .string()
@@ -30,8 +30,10 @@ export const codeSearchParams = {
         .int()
         .positive()
         .optional()
-        .default(30)
-        .describe(`Maximum number of results to return. Defaults to 30.`),
+        .default(15)
+        .describe(
+          `Maximum number of results to return per file. Defaults to 15. There is also a global limit of 250 results across all files.`,
+        ),
     })
     .describe(
       `Search for string patterns in the project's files. This tool uses ripgrep (rg), a fast line-oriented search tool. Use this tool only when read_files is not sufficient to find the files you need.`,

@@ -1,42 +1,55 @@
+import { getAgentTemplate } from '@codebuff/agent-runtime/templates/agent-registry'
+import { expireMessages } from '@codebuff/agent-runtime/util/messages'
 import { AgentTemplateTypes } from '@codebuff/common/types/session-state'
 import { generateCompactId } from '@codebuff/common/util/string'
 import { uniq } from 'lodash'
 
 import { checkTerminalCommand } from './check-terminal-command'
 import { loopAgentSteps } from './run-agent-step'
-import { getAgentTemplate } from './templates/agent-registry'
-import { logger } from './util/logger'
-import { expireMessages } from './util/messages'
-import { requestToolCall } from './websockets/websocket-action'
 
-import type { AgentTemplate } from './templates/types'
+import type { AgentTemplate } from '@codebuff/agent-runtime/templates/types'
 import type { ClientAction } from '@codebuff/common/actions'
 import type { CostMode } from '@codebuff/common/old-constants'
+import type { RequestToolCallFn } from '@codebuff/common/types/contracts/client'
+import type { Logger } from '@codebuff/common/types/contracts/logger'
+import type { ParamsExcluding } from '@codebuff/common/types/function-params'
 import type { PrintModeEvent } from '@codebuff/common/types/print-mode'
 import type {
   SessionState,
   AgentTemplateType,
   AgentOutput,
 } from '@codebuff/common/types/session-state'
-import type { WebSocket } from 'ws'
-
-export interface MainPromptOptions {
-  userId: string | undefined
-  clientSessionId: string
-  onResponseChunk: (chunk: string | PrintModeEvent) => void
-  localAgentTemplates: Record<string, AgentTemplate>
-}
 
 export const mainPrompt = async (
-  ws: WebSocket,
-  action: ClientAction<'prompt'>,
-  options: MainPromptOptions,
+  params: {
+    action: ClientAction<'prompt'>
+
+    onResponseChunk: (chunk: string | PrintModeEvent) => void
+    localAgentTemplates: Record<string, AgentTemplate>
+
+    requestToolCall: RequestToolCallFn
+    logger: Logger
+  } & ParamsExcluding<
+    typeof loopAgentSteps,
+    | 'userInputId'
+    | 'spawnParams'
+    | 'agentState'
+    | 'prompt'
+    | 'content'
+    | 'agentType'
+    | 'fingerprintId'
+    | 'fileContext'
+  > &
+    ParamsExcluding<
+      typeof checkTerminalCommand,
+      'prompt' | 'fingerprintId' | 'userInputId'
+    > &
+    ParamsExcluding<typeof getAgentTemplate, 'agentId'>,
 ): Promise<{
   sessionState: SessionState
   output: AgentOutput
 }> => {
-  const { userId, clientSessionId, onResponseChunk, localAgentTemplates } =
-    options
+  const { action, localAgentTemplates, requestToolCall, logger } = params
 
   const {
     prompt,
@@ -56,7 +69,7 @@ export const mainPrompt = async (
   let agentType: AgentTemplateType
 
   if (agentId) {
-    if (!(await getAgentTemplate(agentId, localAgentTemplates))) {
+    if (!(await getAgentTemplate({ ...params, agentId }))) {
       throw new Error(
         `Invalid agent ID: "${agentId}". Available agents: ${availableAgents.join(', ')}`,
       )
@@ -75,7 +88,12 @@ export const mainPrompt = async (
     // Check for base agent in config
     const configBaseAgent = fileContext.codebuffConfig?.baseAgent
     if (configBaseAgent) {
-      if (!(await getAgentTemplate(configBaseAgent, localAgentTemplates))) {
+      if (
+        !(await getAgentTemplate({
+          ...params,
+          agentId: configBaseAgent,
+        }))
+      ) {
         throw new Error(
           `Invalid base agent in config: "${configBaseAgent}". Available agents: ${availableAgents.join(', ')}`,
         )
@@ -105,7 +123,10 @@ export const mainPrompt = async (
 
   mainAgentState.agentType = agentType
 
-  let mainAgentTemplate = await getAgentTemplate(agentType, localAgentTemplates)
+  let mainAgentTemplate = await getAgentTemplate({
+    ...params,
+    agentId: agentType,
+  })
   if (!mainAgentTemplate) {
     throw new Error(`Agent template not found for type: ${agentType}`)
   }
@@ -134,13 +155,10 @@ export const mainPrompt = async (
     // Check if this is a direct terminal command
     const startTime = Date.now()
     const terminalCommand = await checkTerminalCommand({
+      ...params,
       prompt,
-      options: {
-        clientSessionId,
-        fingerprintId,
-        userInputId: promptId,
-        userId,
-      },
+      fingerprintId,
+      userInputId: promptId,
     })
     const duration = Date.now() - startTime
 
@@ -153,17 +171,16 @@ export const mainPrompt = async (
         `Detected terminal command in ${duration}ms, executing directly: ${prompt}`,
       )
 
-      const { output } = await requestToolCall(
-        ws,
-        promptId,
-        'run_terminal_command',
-        {
+      const { output } = await requestToolCall({
+        userInputId: promptId,
+        toolName: 'run_terminal_command',
+        input: {
           command: terminalCommand,
           mode: 'user',
           process_type: 'SYNC',
           timeout_seconds: -1,
         },
-      )
+      })
 
       mainAgentState.messageHistory.push({
         role: 'tool',
@@ -192,20 +209,16 @@ export const mainPrompt = async (
       }
     }
   }
-
-  const { agentState, output } = await loopAgentSteps(ws, {
+  const { agentState, output } = await loopAgentSteps({
+    ...params,
     userInputId: promptId,
+    spawnParams: promptParams,
+    agentState: mainAgentState,
     prompt,
     content,
-    params: promptParams,
     agentType,
-    agentState: mainAgentState,
     fingerprintId,
     fileContext,
-    userId,
-    clientSessionId,
-    onResponseChunk,
-    localAgentTemplates,
   })
 
   logger.debug({ agentState, output }, 'Main prompt finished')

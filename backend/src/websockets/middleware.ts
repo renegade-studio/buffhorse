@@ -12,23 +12,36 @@ import * as schema from '@codebuff/common/db/schema'
 import { pluralize } from '@codebuff/common/util/string'
 import { eq } from 'drizzle-orm'
 
-import { getUserInfoFromAuthToken } from './auth'
+import { getUserInfoFromApiKey } from './auth'
 import { updateRequestContext } from './request-context'
-import { sendAction } from './websocket-action'
+import {
+  handleStepsLogChunkWs,
+  requestFilesWs,
+  requestMcpToolDataWs,
+  requestOptionalFileWs,
+  requestToolCallWs,
+  sendActionWs,
+  sendSubagentChunkWs,
+} from '../client-wrapper'
 import { withAppContext } from '../context/app-context'
+import { BACKEND_AGENT_RUNTIME_IMPL } from '../impl/agent-runtime'
 import { checkAuth } from '../util/check-auth'
-import { logger } from '../util/logger'
 
-import type { UserInfo } from './auth'
 import type { ClientAction, ServerAction } from '@codebuff/common/actions'
+import type {
+  AgentRuntimeDeps,
+  AgentRuntimeScopedDeps,
+} from '@codebuff/common/types/contracts/agent-runtime'
+import type { Logger } from '@codebuff/common/types/contracts/logger'
 import type { WebSocket } from 'ws'
 
-type MiddlewareCallback = (
-  action: ClientAction,
-  clientSessionId: string,
-  ws: WebSocket,
-  userInfo: UserInfo | undefined,
-) => Promise<void | ServerAction>
+type MiddlewareCallback = (params: {
+  action: ClientAction
+  clientSessionId: string
+  ws: WebSocket
+  userInfo: { id: string } | null
+  logger: Logger
+}) => Promise<void | ServerAction>
 
 function getServerErrorAction<T extends ClientAction>(
   action: T,
@@ -50,36 +63,58 @@ function getServerErrorAction<T extends ClientAction>(
 
 export class WebSocketMiddleware {
   private middlewares: Array<MiddlewareCallback> = []
+  private impl: AgentRuntimeDeps
+
+  constructor(params: AgentRuntimeDeps) {
+    this.impl = params
+  }
 
   use<T extends ClientAction['type']>(
     callback: (
-      action: ClientAction<T>,
-      clientSessionId: string,
-      ws: WebSocket,
-      userInfo: UserInfo | undefined,
+      params: {
+        action: ClientAction<T>
+        clientSessionId: string
+        ws: WebSocket
+        userInfo: { id: string } | null
+      } & AgentRuntimeDeps,
     ) => Promise<void | ServerAction>,
   ) {
     this.middlewares.push(callback as MiddlewareCallback)
   }
 
   async execute(
-    action: ClientAction,
-    clientSessionId: string,
-    ws: WebSocket,
-    options: { silent?: boolean } = {},
+    params: {
+      action: ClientAction
+      clientSessionId: string
+      ws: WebSocket
+      silent?: boolean
+    } & AgentRuntimeDeps,
   ): Promise<boolean> {
+    const {
+      action,
+      clientSessionId,
+      ws,
+      silent,
+      getUserInfoFromApiKey,
+      logger,
+    } = params
+
     const userInfo =
       'authToken' in action && action.authToken
-        ? await getUserInfoFromAuthToken(action.authToken)
-        : undefined
+        ? await getUserInfoFromApiKey({
+            apiKey: action.authToken,
+            fields: ['id'],
+          })
+        : null
 
     for (const middleware of this.middlewares) {
-      const actionOrContinue = await middleware(
+      const actionOrContinue = await middleware({
+        ...params,
         action,
         clientSessionId,
         ws,
         userInfo,
-      )
+      })
       if (actionOrContinue) {
         logger.warn(
           {
@@ -89,8 +124,8 @@ export class WebSocketMiddleware {
           },
           'Middleware execution halted.',
         )
-        if (!options.silent) {
-          sendAction(ws, actionOrContinue)
+        if (!silent) {
+          sendActionWs({ ws, action: actionOrContinue })
         }
         return false
       }
@@ -98,14 +133,19 @@ export class WebSocketMiddleware {
     return true
   }
 
-  run<T extends ClientAction['type']>(
+  run<T extends ClientAction['type']>(params: {
     baseAction: (
-      action: ClientAction<T>,
-      clientSessionId: string,
-      ws: WebSocket,
-    ) => void,
-    options: { silent?: boolean } = {},
-  ) {
+      params: {
+        action: ClientAction<T>
+        clientSessionId: string
+        ws: WebSocket
+      } & AgentRuntimeDeps &
+        AgentRuntimeScopedDeps,
+    ) => void
+    silent?: boolean
+  }) {
+    const { baseAction, silent } = params
+
     return async (
       action: ClientAction<T>,
       clientSessionId: string,
@@ -113,8 +153,23 @@ export class WebSocketMiddleware {
     ) => {
       const userInfo =
         'authToken' in action
-          ? await getUserInfoFromAuthToken(action.authToken!)
+          ? await getUserInfoFromApiKey({
+              apiKey: action.authToken!,
+              fields: ['id', 'email', 'discord_id'],
+            })
           : undefined
+
+      const scopedDeps: AgentRuntimeScopedDeps = {
+        handleStepsLogChunk: (params) =>
+          handleStepsLogChunkWs({ ...params, ws }),
+        requestToolCall: (params) => requestToolCallWs({ ...params, ws }),
+        requestMcpToolData: (params) => requestMcpToolDataWs({ ...params, ws }),
+        requestFiles: (params) => requestFilesWs({ ...params, ws }),
+        requestOptionalFile: (params) =>
+          requestOptionalFileWs({ ...params, ws }),
+        sendSubagentChunk: (params) => sendSubagentChunkWs({ ...params, ws }),
+        sendAction: (params) => sendActionWs({ ...params, ws }),
+      }
 
       // Use the new combined context - much cleaner!
       return withAppContext(
@@ -126,14 +181,21 @@ export class WebSocketMiddleware {
         },
         {}, // request context starts empty
         async () => {
-          const shouldContinue = await this.execute(
+          const shouldContinue = await this.execute({
             action,
             clientSessionId,
             ws,
-            options,
-          )
+            silent,
+            ...this.impl,
+          })
           if (shouldContinue) {
-            baseAction(action, clientSessionId, ws)
+            baseAction({
+              action,
+              clientSessionId,
+              ws,
+              ...this.impl,
+              ...scopedDeps,
+            })
           }
         },
       )
@@ -141,18 +203,18 @@ export class WebSocketMiddleware {
   }
 }
 
-export const protec = new WebSocketMiddleware()
+export const protec = new WebSocketMiddleware(BACKEND_AGENT_RUNTIME_IMPL)
 
-protec.use(async (action, clientSessionId, ws, userInfo) =>
-  checkAuth({
-    fingerprintId: 'fingerprintId' in action ? action.fingerprintId : undefined,
+protec.use(async (params) => {
+  const { action } = params
+  return checkAuth({
+    ...params,
     authToken: 'authToken' in action ? action.authToken : undefined,
-    clientSessionId,
-  }),
-)
+  })
+})
 
 // Organization repository coverage detection middleware
-protec.use(async (action, clientSessionId, ws, userInfo) => {
+protec.use(async ({ action, userInfo, logger }) => {
   const userId = userInfo?.id
 
   // Only process actions that have repoUrl as a valid string
@@ -181,13 +243,21 @@ protec.use(async (action, clientSessionId, ws, userInfo) => {
     const { owner, repo } = ownerRepo
 
     // Perform lookup (cache removed)
-    const orgLookup = await findOrganizationForRepository(userId, repoUrl)
+    const orgLookup = await findOrganizationForRepository({
+      userId,
+      repositoryUrl: repoUrl,
+      logger,
+    })
 
     // If an organization covers this repository, check its balance
     if (orgLookup.found && orgLookup.organizationId) {
       // Check and trigger organization auto top-up if needed
       try {
-        await checkAndTriggerOrgAutoTopup(orgLookup.organizationId, userId)
+        await checkAndTriggerOrgAutoTopup({
+          organizationId: orgLookup.organizationId,
+          userId,
+          logger,
+        })
       } catch (error) {
         logger.error(
           {
@@ -217,11 +287,12 @@ protec.use(async (action, clientSessionId, ws, userInfo) => {
       // Using a far past date ensures all grants are considered for current balance.
       const orgQuotaResetDate = new Date(0)
       const { balance: orgBalance } =
-        await calculateOrganizationUsageAndBalance(
-          orgLookup.organizationId,
-          orgQuotaResetDate,
+        await calculateOrganizationUsageAndBalance({
+          organizationId: orgLookup.organizationId,
+          quotaResetDate: orgQuotaResetDate,
           now,
-        )
+          logger,
+        })
 
       if (orgBalance.totalRemaining <= 0) {
         const orgName = orgLookup.organizationName || 'Your organization'
@@ -283,7 +354,7 @@ protec.use(async (action, clientSessionId, ws, userInfo) => {
   return undefined
 })
 
-protec.use(async (action, clientSessionId, ws, userInfo) => {
+protec.use(async ({ action, clientSessionId, ws, userInfo, logger }) => {
   const userId = userInfo?.id
   const fingerprintId =
     'fingerprintId' in action ? action.fingerprintId : 'unknown-fingerprint'
@@ -313,12 +384,12 @@ protec.use(async (action, clientSessionId, ws, userInfo) => {
   })
 
   // Check and trigger monthly reset if needed
-  await triggerMonthlyResetAndGrant(userId)
+  await triggerMonthlyResetAndGrant({ userId, logger })
 
   // Check if we need to trigger auto top-up and get the amount added (if any)
   let autoTopupAdded: number | undefined = undefined
   try {
-    autoTopupAdded = await checkAndTriggerAutoTopup(userId)
+    autoTopupAdded = await checkAndTriggerAutoTopup({ userId, logger })
   } catch (error) {
     logger.error(
       {
@@ -341,10 +412,11 @@ protec.use(async (action, clientSessionId, ws, userInfo) => {
     // Continue execution to check remaining balance
   }
 
-  const { usageThisCycle, balance } = await calculateUsageAndBalance(
+  const { usageThisCycle, balance } = await calculateUsageAndBalance({
     userId,
-    user?.next_quota_reset ?? new Date(0),
-  )
+    quotaResetDate: user?.next_quota_reset ?? new Date(0),
+    logger,
+  })
 
   // Check if we have enough remaining credits
   if (balance.totalRemaining <= 0) {
@@ -362,13 +434,16 @@ protec.use(async (action, clientSessionId, ws, userInfo) => {
   }
 
   // Send initial usage info if we have sufficient credits
-  sendAction(ws, {
-    type: 'usage-response',
-    usage: usageThisCycle,
-    remainingBalance: balance.totalRemaining,
-    balanceBreakdown: balance.breakdown,
-    next_quota_reset: user?.next_quota_reset ?? null,
-    autoTopupAdded, // Include the amount added by auto top-up (if any)
+  sendActionWs({
+    ws,
+    action: {
+      type: 'usage-response',
+      usage: usageThisCycle,
+      remainingBalance: balance.totalRemaining,
+      balanceBreakdown: balance.breakdown,
+      next_quota_reset: user?.next_quota_reset ?? null,
+      autoTopupAdded, // Include the amount added by auto top-up (if any)
+    },
   })
 
   return undefined

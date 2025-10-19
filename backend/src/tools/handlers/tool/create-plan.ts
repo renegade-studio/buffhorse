@@ -2,18 +2,18 @@ import { trackEvent } from '@codebuff/common/analytics'
 import { AnalyticsEvent } from '@codebuff/common/constants/analytics-events'
 
 import { getFileProcessingValues, postStreamProcessing } from './write-file'
-import { logger } from '../../../util/logger'
 
-import type { CodebuffToolHandlerFunction } from '../handler-function-type'
 import type {
   FileProcessingState,
   OptionalFileProcessingState,
 } from './write-file'
+import type { CodebuffToolHandlerFunction } from '@codebuff/agent-runtime/tools/handlers/handler-function-type'
 import type {
   ClientToolCall,
   CodebuffToolCall,
   CodebuffToolOutput,
 } from '@codebuff/common/tools/list'
+import type { Logger } from '@codebuff/common/types/contracts/logger'
 
 export const handleCreatePlan = ((params: {
   previousToolCallFinished: Promise<void>
@@ -22,6 +22,7 @@ export const handleCreatePlan = ((params: {
     toolCall: ClientToolCall<'create_plan'>,
   ) => Promise<CodebuffToolOutput<'create_plan'>>
   writeToClient: (chunk: string) => void
+  logger: Logger
 
   getLatestState: () => FileProcessingState
   state: {
@@ -41,6 +42,7 @@ export const handleCreatePlan = ((params: {
     toolCall,
     requestClientToolCall,
     writeToClient,
+    logger,
     getLatestState,
     state,
   } = params

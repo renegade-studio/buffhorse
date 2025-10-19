@@ -2,15 +2,27 @@ import path from 'path'
 
 import { TEST_USER_ID } from '@codebuff/common/old-constants'
 import {
+  TEST_AGENT_RUNTIME_IMPL,
+  TEST_AGENT_RUNTIME_SCOPED_IMPL,
+} from '@codebuff/common/testing/impl/agent-runtime'
+import {
   clearMockedModules,
   mockModule,
 } from '@codebuff/common/testing/mock-modules'
-import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'bun:test'
 import { createPatch } from 'diff'
 
 import { rewriteWithOpenAI } from '../fast-rewrite'
 
+import type {
+  AgentRuntimeDeps,
+  AgentRuntimeScopedDeps,
+} from '@codebuff/common/types/contracts/agent-runtime'
+
 describe.skip('rewriteWithOpenAI', () => {
+  let agentRuntimeImpl: AgentRuntimeDeps
+  let agentRuntimeScopedImpl: AgentRuntimeScopedDeps
+
   beforeAll(() => {
     // Mock database interactions
     mockModule('pg-pool', () => ({
@@ -33,6 +45,11 @@ describe.skip('rewriteWithOpenAI', () => {
     }))
   })
 
+  beforeEach(() => {
+    agentRuntimeImpl = { ...TEST_AGENT_RUNTIME_IMPL }
+    agentRuntimeScopedImpl = { ...TEST_AGENT_RUNTIME_SCOPED_IMPL }
+  })
+
   afterAll(() => {
     clearMockedModules()
   })
@@ -44,14 +61,14 @@ describe.skip('rewriteWithOpenAI', () => {
     const expectedResult = await Bun.file(`${testDataDir}/expected.go`).text()
 
     const result = await rewriteWithOpenAI({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
       oldContent: originalContent,
       editSnippet,
-      filePath: 'taskruntoolcall.go',
       clientSessionId: 'clientSessionId',
       fingerprintId: 'fingerprintId',
       userInputId: 'userInputId',
       userId: TEST_USER_ID,
-      userMessage: undefined,
     })
 
     const patch = createPatch('test.ts', expectedResult, result)

@@ -1,19 +1,20 @@
 import { consumeCreditsWithFallback } from '@codebuff/billing'
+import { PROFIT_MARGIN } from '@codebuff/common/old-constants'
 
 import { getRequestContext } from '../../../context/app-context'
 import { searchWeb } from '../../../llm-apis/linkup-api'
-import { PROFIT_MARGIN } from '../../../llm-apis/message-cost-tracker'
-import { logger } from '../../../util/logger'
 
-import type { CodebuffToolHandlerFunction } from '../handler-function-type'
+import type { CodebuffToolHandlerFunction } from '@codebuff/agent-runtime/tools/handlers/handler-function-type'
 import type {
   CodebuffToolCall,
   CodebuffToolOutput,
 } from '@codebuff/common/tools/list'
+import type { Logger } from '@codebuff/common/types/contracts/logger'
 
 export const handleWebSearch = ((params: {
   previousToolCallFinished: Promise<void>
   toolCall: CodebuffToolCall<'web_search'>
+  logger: Logger
 
   agentStepId: string
   clientSessionId: string
@@ -28,6 +29,7 @@ export const handleWebSearch = ((params: {
   const {
     previousToolCallFinished,
     toolCall,
+    logger,
     agentStepId,
     clientSessionId,
     userInputId,
@@ -57,7 +59,7 @@ export const handleWebSearch = ((params: {
   const webSearchPromise: Promise<CodebuffToolOutput<'web_search'>> =
     (async () => {
       try {
-        const searchResult = await searchWeb(query, { depth })
+        const searchResult = await searchWeb({ query, depth, logger })
         const searchDuration = Date.now() - searchStartTime
         const resultLength = searchResult?.length || 0
         const hasResults = Boolean(searchResult && searchResult.trim())
@@ -76,6 +78,7 @@ export const handleWebSearch = ((params: {
             creditsToCharge,
             repoUrl,
             context: 'web search',
+            logger,
           })
 
           if (!creditResult.success) {

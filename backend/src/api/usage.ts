@@ -1,12 +1,11 @@
 import { getOrganizationUsageResponse } from '@codebuff/billing'
-import db from '@codebuff/common/db'
-import * as schema from '@codebuff/common/db/schema'
 import { INVALID_AUTH_TOKEN_MESSAGE } from '@codebuff/common/old-constants'
-import { eq } from 'drizzle-orm'
 import { z } from 'zod/v4'
 
+import { BACKEND_AGENT_RUNTIME_IMPL } from '../impl/agent-runtime'
 import { checkAuth } from '../util/check-auth'
 import { logger } from '../util/logger'
+import { getUserInfoFromApiKey } from '../websockets/auth'
 import { genUsageResponse } from '../websockets/websocket-action'
 
 import type {
@@ -21,18 +20,6 @@ const usageRequestSchema = z.object({
   orgId: z.string().optional(),
 })
 
-async function getUserIdFromAuthToken(
-  token: string,
-): Promise<string | undefined> {
-  const user = await db
-    .select({ userId: schema.user.id })
-    .from(schema.user)
-    .innerJoin(schema.session, eq(schema.user.id, schema.session.userId))
-    .where(eq(schema.session.sessionToken, token))
-    .then((users) => users[0]?.userId)
-  return user
-}
-
 async function usageHandler(
   req: ExpressRequest,
   res: ExpressResponse,
@@ -45,7 +32,7 @@ async function usageHandler(
     const clientSessionId = `api-${fingerprintId}-${Date.now()}`
 
     const authResult = await checkAuth({
-      fingerprintId,
+      ...BACKEND_AGENT_RUNTIME_IMPL,
       authToken,
       clientSessionId,
     })
@@ -58,7 +45,7 @@ async function usageHandler(
     }
 
     const userId = authToken
-      ? await getUserIdFromAuthToken(authToken)
+      ? (await getUserInfoFromApiKey({ apiKey: authToken, fields: ['id'] }))?.id
       : undefined
 
     if (!userId) {
@@ -71,10 +58,11 @@ async function usageHandler(
     // If orgId is provided, return organization usage data
     if (orgId) {
       try {
-        const orgUsageResponse = await getOrganizationUsageResponse(
-          orgId,
+        const orgUsageResponse = await getOrganizationUsageResponse({
+          organizationId: orgId,
           userId,
-        )
+          logger,
+        })
         return res.status(200).json(orgUsageResponse)
       } catch (error) {
         logger.error(
@@ -94,6 +82,7 @@ async function usageHandler(
       fingerprintId,
       userId,
       clientSessionId,
+      logger,
     })
 
     return res.status(200).json(usageResponse)

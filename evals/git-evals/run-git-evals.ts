@@ -42,6 +42,7 @@ export async function runSingleEval(
   fingerprintId: string,
   codingAgent: 'codebuff' | 'claude',
   agent?: string,
+  promptWithAgent: boolean = false,
 ): Promise<EvalRunJudged> {
   const startTime = new Date()
   const trace: CodebuffTrace[] = []
@@ -68,8 +69,8 @@ export async function runSingleEval(
   process.on('unhandledRejection', unhandledHandler)
 
   try {
-    // Reset to the commit before the target commit
-    resetRepoToCommit(projectPath, `${evalCommit.sha}^`)
+    // Reset to the parent commit
+    resetRepoToCommit(projectPath, evalCommit.parentSha)
 
     // Initialize state
     let runner: Runner
@@ -93,7 +94,7 @@ export async function runSingleEval(
 
     let currentDecision: AgentDecision = 'continue'
     let attempts = 0
-    const MAX_ATTEMPTS = 5
+    const MAX_ATTEMPTS = promptWithAgent ? 5 : 1
 
     while (currentDecision === 'continue' && attempts < MAX_ATTEMPTS) {
       // Check for process-level errors
@@ -119,11 +120,17 @@ export async function runSingleEval(
       // Get next prompt from prompting agent with timeout
       let agentResponse: z.infer<typeof AgentDecisionSchema>
       try {
-        agentResponse = await promptAiSdkStructured({
-          messages: [
-            {
-              role: 'user',
-              content: `You are an expert software engineer tasked with implementing a specification using CodeBuff, an AI coding assistant. Your goal is to prompt CodeBuff to implement the spec correctly. You are in a conversation with this coding agent.
+        agentResponse = !promptWithAgent
+          ? {
+              decision: 'continue',
+              reasoning: 'Using spec as sole prompt',
+              next_prompt: evalCommit.spec,
+            }
+          : await promptAiSdkStructured({
+              messages: [
+                {
+                  role: 'user',
+                  content: `You are an expert software engineer tasked with implementing a specification using CodeBuff, an AI coding assistant. Your goal is to prompt CodeBuff to implement the spec correctly. You are in a conversation with this coding agent.
 
 Current spec to implement:
 <spec>${evalCommit.spec}</spec>
@@ -142,16 +149,18 @@ You must decide whether to:
 
 If deciding to continue, include a clear, focused prompt for Codebuff in next_prompt. Note that Codebuff does not have access to the spec, so you must describe the changes you want Codebuff to make in a way that is clear and concise.
 Explain your reasoning in detail. Do not ask Codebuff to git commit changes.`,
-            },
-          ],
-          schema: AgentDecisionSchema,
-          model: 'x-ai/grok-4-fast',
-          clientSessionId,
-          fingerprintId,
-          userInputId: generateCompactId(),
-          userId: undefined,
-          timeout: 5 * 60_000, // 5 minute timeout
-        })
+                },
+              ],
+              schema: AgentDecisionSchema,
+              model: 'x-ai/grok-4-fast',
+              clientSessionId,
+              fingerprintId,
+              userInputId: generateCompactId(),
+              userId: undefined,
+              timeout: 5 * 60_000, // 5 minute timeout
+              sendAction: () => {},
+              logger: console,
+            })
       } catch (agentError) {
         throw new Error(
           `Agent decision failed: ${agentError instanceof Error ? `${agentError.message}\n${JSON.stringify(agentError)}\n${agentError.stack}` : String(agentError)}`,
@@ -213,7 +222,7 @@ Explain your reasoning in detail. Do not ask Codebuff to git commit changes.`,
   const endTime = new Date()
   const durationMs = endTime.getTime() - startTime.getTime()
 
-  const fileStates = getCodebuffFileStates(evalCommit.sha, projectPath)
+  const fileStates = getCodebuffFileStates(evalCommit, projectPath)
 
   if (fs.existsSync(projectPath) && fs.statSync(projectPath).isDirectory()) {
     fs.rmSync(projectPath, { recursive: true, force: true })
@@ -240,16 +249,6 @@ Explain your reasoning in detail. Do not ask Codebuff to git commit changes.`,
         runtime_sec: durationMs / 1000,
         cost_usd: totalCostUsd,
       },
-    }
-
-    if (process.env.NEXT_PUBLIC_CB_ENVIRONMENT === 'dev') {
-      const { eval_commit, gitDiff, ...rest } = result
-      const { fileStates, ...rest2 } = eval_commit
-
-      writeJsonToFile(
-        { ...rest, ...rest2 },
-        path.join(__dirname, `trace-${evalCommit.sha}.json`),
-      )
     }
 
     return result
@@ -286,13 +285,12 @@ function writeJsonToFile(json: any, path: string) {
 }
 
 function getCodebuffFileStates(
-  evalCommitSha: string,
+  evalCommit: EvalCommit,
   projectPath: string,
 ): string {
-  // Get all changes since the commit before the target commit
   execFileSync('git', ['add', '.'], { cwd: projectPath, stdio: 'ignore' })
 
-  return execFileSync('git', ['diff', `${evalCommitSha}^`], {
+  return execFileSync('git', ['diff', evalCommit.parentSha], {
     cwd: projectPath,
     stdio: ['ignore', 'pipe', 'pipe'],
   }).toString()
@@ -378,6 +376,8 @@ export async function runGitEvals(
   limit?: number,
   logToStdout: boolean = false,
   agent: string = 'base',
+  worktreePath?: string,
+  promptWithAgent: boolean = false,
 ): Promise<FullEvalLog> {
   // Set up signal handlers if this is the main module
   if (require.main === module) {
@@ -419,12 +419,6 @@ export async function runGitEvals(
   const logsDir = path.join(outputDir, 'logs', `${testRepoName}-${traceId}`)
   fs.mkdirSync(logsDir, { recursive: true })
 
-  // Generate filenames with trace ID (single file that gets overwritten)
-  const partialOutputPath = path.join(
-    outputDir,
-    `eval-partial-${testRepoName}-${traceId}.json`,
-  )
-
   const commitsToRun = limit
     ? evalData.evalCommits.slice(0, limit)
     : evalData.evalCommits
@@ -454,6 +448,7 @@ export async function runGitEvals(
               evalCommit.sha,
               true,
               evalData.initCommand,
+              evalCommit.parentSha,
             )
 
             console.log(
@@ -464,21 +459,33 @@ export async function runGitEvals(
               .split('\n')[0]
               .replace(/[^a-zA-Z0-9]/g, '_')
               .slice(0, 30)
-            const logFilename = `${safeMessage}-${evalCommit.sha.slice(0, 7)}.log`
+            const date = new Date().toISOString().replace(/[:.]/g, '-')
+            const logFilename = `${date}-${safeMessage}-${evalCommit.sha.slice(0, 7)}.log`
             const logPath = path.join(logsDir, logFilename)
             const logStream = logToStdout
               ? process.stdout
               : fs.createWriteStream(logPath)
 
             // Write evalCommit to temporary file to avoid long command line arguments
-            const tempEvalCommitPath = path.join(
+            // Use absolute path so it works from worktree too
+            const tempEvalCommitPath = path.resolve(
               logsDir,
               `eval-commit-${evalCommit.sha.slice(0, 7)}.json`,
             )
             fs.writeFileSync(tempEvalCommitPath, JSON.stringify(evalCommit))
 
+            // Resolve the process script path relative to worktree if provided
+            const processScriptPath = worktreePath
+              ? path.join(
+                  worktreePath,
+                  'evals',
+                  'git-evals',
+                  'run-single-eval-process.ts',
+                )
+              : path.resolve(__dirname, 'run-single-eval-process.ts')
+
             const child = fork(
-              path.resolve(__dirname, 'run-single-eval-process.ts'),
+              processScriptPath,
               [
                 tempEvalCommitPath,
                 projectPath,
@@ -486,11 +493,14 @@ export async function runGitEvals(
                 fingerprintId,
                 codingAgent,
                 agent,
+                promptWithAgent.toString(),
               ],
               {
                 stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
                 env: process.env,
                 detached: true, // Create new process group for proper signal handling
+                // Set cwd to worktree so relative imports work correctly
+                ...(worktreePath ? { cwd: worktreePath } : {}),
               },
             )
 

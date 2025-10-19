@@ -1,6 +1,10 @@
 import * as bigquery from '@codebuff/bigquery'
 import * as analytics from '@codebuff/common/analytics'
 import { TEST_USER_ID } from '@codebuff/common/old-constants'
+import {
+  TEST_AGENT_RUNTIME_IMPL,
+  TEST_AGENT_RUNTIME_SCOPED_IMPL,
+} from '@codebuff/common/testing/impl/agent-runtime'
 import { getToolCallString } from '@codebuff/common/tools/utils'
 import { getInitialSessionState } from '@codebuff/common/types/session-state'
 import * as stringUtils from '@codebuff/common/util/string'
@@ -14,31 +18,29 @@ import {
   test,
 } from 'bun:test'
 
-import { MockWebSocket, mockFileContext } from './test-utils'
-import * as aisdk from '../llm-apis/vercel-ai-sdk/ai-sdk'
+import { mockFileContext } from './test-utils'
 import { processStreamWithTools } from '../tools/stream-parser'
-import * as websocketAction from '../websockets/websocket-action'
 
-import type { AgentTemplate } from '../templates/types'
+import type { AgentTemplate } from '@codebuff/agent-runtime/templates/types'
+import type {
+  AgentRuntimeDeps,
+  AgentRuntimeScopedDeps,
+} from '@codebuff/common/types/contracts/agent-runtime'
 import type {
   Message,
   ToolMessage,
 } from '@codebuff/common/types/messages/codebuff-message'
-import type { Logger } from '@codebuff/types/logger'
-import type { WebSocket } from 'ws'
+
+let agentRuntimeImpl: AgentRuntimeDeps = { ...TEST_AGENT_RUNTIME_IMPL }
 
 describe('malformed tool call error handling', () => {
   let testAgent: AgentTemplate
-  let mockWs: MockWebSocket
-  const logger: Logger = {
-    debug: () => {},
-    error: () => {},
-    info: () => {},
-    warn: () => {},
-  }
+  let agentRuntimeScopedImpl: AgentRuntimeScopedDeps
+  let agentRuntimeImpl: AgentRuntimeDeps
 
   beforeEach(() => {
-    mockWs = new MockWebSocket()
+    agentRuntimeImpl = { ...TEST_AGENT_RUNTIME_IMPL }
+    agentRuntimeScopedImpl = { ...TEST_AGENT_RUNTIME_SCOPED_IMPL }
 
     testAgent = {
       id: 'test-agent',
@@ -59,28 +61,28 @@ describe('malformed tool call error handling', () => {
 
     // Mock analytics and tracing
     spyOn(analytics, 'initAnalytics').mockImplementation(() => {})
-    analytics.initAnalytics({ logger })
+    analytics.initAnalytics(TEST_AGENT_RUNTIME_IMPL)
     spyOn(analytics, 'trackEvent').mockImplementation(() => {})
     spyOn(bigquery, 'insertTrace').mockImplementation(() =>
       Promise.resolve(true),
     )
 
     // Mock websocket actions
-    spyOn(websocketAction, 'requestFiles').mockImplementation(async () => ({}))
-    spyOn(websocketAction, 'requestFile').mockImplementation(async () => null)
-    spyOn(websocketAction, 'requestToolCall').mockImplementation(async () => ({
+    agentRuntimeScopedImpl.requestFiles = async () => ({})
+    agentRuntimeScopedImpl.requestOptionalFile = async () => null
+    agentRuntimeScopedImpl.requestToolCall = async () => ({
       output: [
         {
           type: 'json',
           value: 'Tool call success',
         },
       ],
-    }))
+    })
 
     // Mock LLM APIs
-    spyOn(aisdk, 'promptAiSdk').mockImplementation(() =>
-      Promise.resolve('Test response'),
-    )
+    agentRuntimeImpl.promptAiSdk = async function () {
+      return 'Test response'
+    }
 
     // Mock generateCompactId for consistent test results
     spyOn(stringUtils, 'generateCompactId').mockReturnValue('test-tool-call-id')
@@ -88,6 +90,7 @@ describe('malformed tool call error handling', () => {
 
   afterEach(() => {
     mock.restore()
+    agentRuntimeImpl = { ...TEST_AGENT_RUNTIME_IMPL }
   })
 
   function createMockStream(chunks: string[]) {
@@ -114,8 +117,9 @@ describe('malformed tool call error handling', () => {
     const agentState = sessionState.mainAgentState
 
     const result = await processStreamWithTools({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
       stream,
-      ws: mockWs as unknown as WebSocket,
       agentStepId: 'test-step',
       clientSessionId: 'test-session',
       fingerprintId: 'test-fingerprint',
@@ -170,8 +174,9 @@ describe('malformed tool call error handling', () => {
     const agentState = sessionState.mainAgentState
 
     const result = await processStreamWithTools({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
       stream,
-      ws: mockWs as unknown as WebSocket,
       agentStepId: 'test-step',
       clientSessionId: 'test-session',
       fingerprintId: 'test-fingerprint',
@@ -216,8 +221,9 @@ describe('malformed tool call error handling', () => {
     const agentState = sessionState.mainAgentState
 
     const result = await processStreamWithTools({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
       stream,
-      ws: mockWs as unknown as WebSocket,
       agentStepId: 'test-step',
       clientSessionId: 'test-session',
       fingerprintId: 'test-fingerprint',
@@ -266,8 +272,9 @@ describe('malformed tool call error handling', () => {
     const agentState = sessionState.mainAgentState
 
     const result = await processStreamWithTools({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
       stream,
-      ws: mockWs as unknown as WebSocket,
       agentStepId: 'test-step',
       clientSessionId: 'test-session',
       fingerprintId: 'test-fingerprint',
@@ -318,8 +325,9 @@ describe('malformed tool call error handling', () => {
     const agentState = sessionState.mainAgentState
 
     const result = await processStreamWithTools({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
       stream,
-      ws: mockWs as unknown as WebSocket,
       agentStepId: 'test-step',
       clientSessionId: 'test-session',
       fingerprintId: 'test-fingerprint',
@@ -372,8 +380,9 @@ describe('malformed tool call error handling', () => {
     const agentState = sessionState.mainAgentState
 
     const result = await processStreamWithTools({
+      ...agentRuntimeImpl,
+      ...agentRuntimeScopedImpl,
       stream,
-      ws: mockWs as unknown as WebSocket,
       agentStepId: 'test-step',
       clientSessionId: 'test-session',
       fingerprintId: 'test-fingerprint',

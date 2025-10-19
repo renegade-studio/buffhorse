@@ -1,3 +1,4 @@
+import { getMCPToolData } from '@codebuff/agent-runtime/mcp'
 import { endsAgentStepParam } from '@codebuff/common/tools/constants'
 import { generateCompactId } from '@codebuff/common/util/string'
 import { type ToolCallPart } from 'ai'
@@ -6,14 +7,11 @@ import z from 'zod/v4'
 import { convertJsonSchemaToZod } from 'zod-from-json-schema'
 
 import { checkLiveUserInput } from '../live-user-inputs'
-import { logger } from '../util/logger'
-import { requestToolCall } from '../websockets/websocket-action'
 import { codebuffToolDefs } from './definitions/list'
 import { codebuffToolHandlers } from './handlers/list'
-import { getMCPToolData } from '../mcp/util'
 
-import type { CodebuffToolHandlerFunction } from './handlers/handler-function-type'
-import type { AgentTemplate } from '../templates/types'
+import type { AgentTemplate } from '@codebuff/agent-runtime/templates/types'
+import type { CodebuffToolHandlerFunction } from '@codebuff/agent-runtime/tools/handlers/handler-function-type'
 import type { ToolName } from '@codebuff/common/tools/constants'
 import type {
   ClientToolCall,
@@ -21,6 +19,10 @@ import type {
   CodebuffToolCall,
   CodebuffToolOutput,
 } from '@codebuff/common/tools/list'
+import type {
+  AgentRuntimeDeps,
+  AgentRuntimeScopedDeps,
+} from '@codebuff/common/types/contracts/agent-runtime'
 import type { Message } from '@codebuff/common/types/messages/codebuff-message'
 import type {
   ToolResultOutput,
@@ -31,7 +33,6 @@ import type {
   customToolDefinitionsSchema,
   ProjectFileContext,
 } from '@codebuff/common/util/file'
-import type { WebSocket } from 'ws'
 
 export type CustomToolCall = {
   toolName: string
@@ -112,14 +113,13 @@ export function parseRawToolCall<T extends ToolName = ToolName>(params: {
   } as CodebuffToolCall<T>
 }
 
-export interface ExecuteToolCallParams<T extends string = ToolName> {
+export type ExecuteToolCallParams<T extends string = ToolName> = {
   toolName: T
   input: Record<string, unknown>
   toolCalls: (CodebuffToolCall | CustomToolCall)[]
   toolResults: ToolResultPart[]
   toolResultsToAddAfterStream: ToolResultPart[]
   previousToolCallFinished: Promise<void>
-  ws: WebSocket
   agentTemplate: AgentTemplate
   fileContext: ProjectFileContext
   agentStepId: string
@@ -131,28 +131,36 @@ export interface ExecuteToolCallParams<T extends string = ToolName> {
   userId: string | undefined
   autoInsertEndStepParam?: boolean
   excludeToolFromMessageHistory?: boolean
-}
+  fromHandleSteps?: boolean
+} & AgentRuntimeDeps &
+  AgentRuntimeScopedDeps
 
-export function executeToolCall<T extends ToolName>({
-  toolName,
-  input,
-  toolCalls,
-  toolResults,
-  toolResultsToAddAfterStream,
-  previousToolCallFinished,
-  ws,
-  agentTemplate,
-  fileContext,
-  agentStepId,
-  clientSessionId,
-  userInputId,
-  fullResponse,
-  onResponseChunk,
-  state,
-  userId,
-  autoInsertEndStepParam = false,
-  excludeToolFromMessageHistory = false,
-}: ExecuteToolCallParams<T>): Promise<void> {
+export function executeToolCall<T extends ToolName>(
+  params: ExecuteToolCallParams<T>,
+): Promise<void> {
+  const {
+    toolName,
+    input,
+    toolCalls,
+    toolResults,
+    toolResultsToAddAfterStream,
+    previousToolCallFinished,
+    agentTemplate,
+    fileContext,
+    agentStepId,
+    clientSessionId,
+    userInputId,
+    fullResponse,
+    onResponseChunk,
+    state,
+    userId,
+    autoInsertEndStepParam = false,
+    excludeToolFromMessageHistory = false,
+    requestToolCall,
+    requestMcpToolData,
+    logger,
+    fromHandleSteps = false,
+  } = params
   const toolCall: CodebuffToolCall<T> | ToolCallError = parseRawToolCall<T>({
     rawToolCall: {
       toolName,
@@ -189,12 +197,17 @@ export function executeToolCall<T extends ToolName>({
     toolCallId: toolCall.toolCallId,
     toolName,
     input: toolCall.input,
+    // Only include agentId for subagents (agents with a parent)
+    ...(state.agentState?.parentId && { agentId: state.agentState.agentId }),
   })
 
   toolCalls.push(toolCall)
 
   // Filter out restricted tools in ask mode unless exporting summary
-  if (!agentTemplate.toolNames.includes(toolCall.toolName)) {
+  if (
+    !agentTemplate.toolNames.includes(toolCall.toolName) &&
+    !fromHandleSteps
+  ) {
     const toolResult: ToolResultPart = {
       type: 'tool-result',
       toolName,
@@ -216,6 +229,7 @@ export function executeToolCall<T extends ToolName>({
   // Cast to any to avoid type errors
   const handler = codebuffToolHandlers[toolName] as any
   const { result: toolResultPromise, state: stateUpdate } = handler({
+    ...params,
     previousToolCallFinished,
     fileContext,
     agentStepId,
@@ -226,16 +240,15 @@ export function executeToolCall<T extends ToolName>({
     requestClientToolCall: async (
       clientToolCall: ClientToolCall<T extends ClientToolName ? T : never>,
     ) => {
-      if (!checkLiveUserInput(userId, userInputId, clientSessionId)) {
+      if (!checkLiveUserInput(params)) {
         return []
       }
 
-      const clientToolResult = await requestToolCall(
-        ws,
+      const clientToolResult = await requestToolCall({
         userInputId,
-        clientToolCall.toolName,
-        clientToolCall.input,
-      )
+        toolName: clientToolCall.toolName,
+        input: clientToolCall.input,
+      })
       return clientToolResult.output as CodebuffToolOutput<T>
     },
     toolCall,
@@ -270,6 +283,7 @@ export function executeToolCall<T extends ToolName>({
     onResponseChunk({
       type: 'tool_result',
       toolCallId: toolResult.toolCallId,
+      toolName: toolResult.toolName,
       output: toolResult.output,
     })
 
@@ -360,27 +374,30 @@ export function parseRawCustomToolCall(params: {
   }
 }
 
-export async function executeCustomToolCall({
-  toolName,
-  input,
-  toolCalls,
-  toolResults,
-  toolResultsToAddAfterStream,
-  previousToolCallFinished,
-  ws,
-  agentTemplate,
-  fileContext,
-  clientSessionId,
-  userInputId,
-  onResponseChunk,
-  state,
-  userId,
-  autoInsertEndStepParam = false,
-  excludeToolFromMessageHistory = false,
-}: ExecuteToolCallParams<string>): Promise<void> {
+export async function executeCustomToolCall(
+  params: ExecuteToolCallParams<string>,
+): Promise<void> {
+  const {
+    toolName,
+    input,
+    toolCalls,
+    toolResults,
+    toolResultsToAddAfterStream,
+    previousToolCallFinished,
+    agentTemplate,
+    fileContext,
+    userInputId,
+    onResponseChunk,
+    state,
+    autoInsertEndStepParam = false,
+    excludeToolFromMessageHistory = false,
+    requestToolCall,
+    logger,
+    fromHandleSteps = false,
+  } = params
   const toolCall: CustomToolCall | ToolCallError = parseRawCustomToolCall({
     customToolDefs: await getMCPToolData({
-      ws,
+      ...params,
       toolNames: agentTemplate.toolNames,
       mcpServers: agentTemplate.mcpServers,
       writeTo: cloneDeep(fileContext.customToolDefinitions),
@@ -420,6 +437,8 @@ export async function executeCustomToolCall({
     toolCallId: toolCall.toolCallId,
     toolName,
     input: toolCall.input,
+    // Only include agentId for subagents (agents with a parent)
+    ...(state.agentState?.parentId && { agentId: state.agentState.agentId }),
   })
 
   toolCalls.push(toolCall)
@@ -427,6 +446,7 @@ export async function executeCustomToolCall({
   // Filter out restricted tools in ask mode unless exporting summary
   if (
     !(agentTemplate.toolNames as string[]).includes(toolCall.toolName) &&
+    !fromHandleSteps &&
     !(
       toolCall.toolName.includes('/') &&
       toolCall.toolName.split('/')[0] in agentTemplate.mcpServers
@@ -452,22 +472,21 @@ export async function executeCustomToolCall({
 
   return previousToolCallFinished
     .then(async () => {
-      if (!checkLiveUserInput(userId, userInputId, clientSessionId)) {
+      if (!checkLiveUserInput(params)) {
         return null
       }
 
       const toolName = toolCall.toolName.includes('/')
         ? toolCall.toolName.split('/').slice(1).join('/')
         : toolCall.toolName
-      const clientToolResult = await requestToolCall(
-        ws,
+      const clientToolResult = await requestToolCall({
         userInputId,
         toolName,
-        toolCall.input,
-        toolCall.toolName.includes('/')
+        input: toolCall.input,
+        mcpConfig: toolCall.toolName.includes('/')
           ? agentTemplate.mcpServers[toolCall.toolName.split('/')[0]]
           : undefined,
-      )
+      })
       return clientToolResult.output satisfies ToolResultOutput[]
     })
     .then((result) => {
@@ -490,6 +509,7 @@ export async function executeCustomToolCall({
 
       onResponseChunk({
         type: 'tool_result',
+        toolName: toolResult.toolName,
         toolCallId: toolResult.toolCallId,
         output: toolResult.output,
       })

@@ -4,10 +4,8 @@ import { cloneDeep } from 'lodash'
 
 import { addAgentStep } from './agent-run'
 import { executeToolCall } from './tools/tool-executor'
-import { logger } from './util/logger'
 import { SandboxManager } from './util/quickjs-sandbox'
 import { getRequestContext } from './websockets/request-context'
-import { sendAction } from './websockets/websocket-action'
 
 import type { CodebuffToolCall } from '@codebuff/common/tools/list'
 import type {
@@ -16,13 +14,20 @@ import type {
   PublicAgentState,
 } from '@codebuff/common/types/agent-template'
 import type {
+  HandleStepsLogChunkFn,
+  SendActionFn,
+} from '@codebuff/common/types/contracts/client'
+import type { Logger } from '@codebuff/common/types/contracts/logger'
+import type {
+  ParamsExcluding,
+  ParamsOf,
+} from '@codebuff/common/types/function-params'
+import type {
   ToolResultOutput,
   ToolResultPart,
 } from '@codebuff/common/types/messages/content-part'
 import type { PrintModeEvent } from '@codebuff/common/types/print-mode'
 import type { AgentState } from '@codebuff/common/types/session-state'
-import type { ProjectFileContext } from '@codebuff/common/util/file'
-import type { WebSocket } from 'ws'
 
 // Global sandbox manager for QuickJS contexts
 const sandboxManager = new SandboxManager()
@@ -32,50 +37,69 @@ const runIdToGenerator: Record<string, StepGenerator | undefined> = {}
 export const runIdToStepAll: Set<string> = new Set()
 
 // Function to clear the generator cache for testing purposes
-export function clearAgentGeneratorCache() {
+export function clearAgentGeneratorCache(
+  params: ParamsOf<typeof sandboxManager.dispose>,
+) {
   for (const key in runIdToGenerator) {
     delete runIdToGenerator[key]
   }
   runIdToStepAll.clear()
   // Clean up QuickJS sandboxes
-  sandboxManager.dispose()
+  sandboxManager.dispose(params)
 }
 
 // Function to handle programmatic agents
 export async function runProgrammaticStep(
-  agentState: AgentState,
-  {
-    template,
-    prompt,
-    params,
-    system,
-    userId,
-    userInputId,
-    clientSessionId,
-    fingerprintId,
-    onResponseChunk,
-    fileContext,
-    ws,
-    localAgentTemplates,
-    stepsComplete,
-    stepNumber,
-  }: {
+  params: {
+    agentState: AgentState
     template: AgentTemplate
     prompt: string | undefined
-    params: Record<string, any> | undefined
+    toolCallParams: Record<string, any> | undefined
     system: string | undefined
     userId: string | undefined
     userInputId: string
-    clientSessionId: string
     fingerprintId: string
     onResponseChunk: (chunk: string | PrintModeEvent) => void
-    fileContext: ProjectFileContext
-    ws: WebSocket
     localAgentTemplates: Record<string, AgentTemplate>
     stepsComplete: boolean
     stepNumber: number
-  },
+    handleStepsLogChunk: HandleStepsLogChunkFn
+    sendAction: SendActionFn
+    logger: Logger
+  } & ParamsExcluding<
+    typeof executeToolCall,
+    | 'toolName'
+    | 'input'
+    | 'toolCalls'
+    | 'toolResults'
+    | 'toolResultsToAddAfterStream'
+    | 'previousToolCallFinished'
+    | 'agentStepId'
+    | 'agentTemplate'
+    | 'fullResponse'
+    | 'autoInsertEndStepParam'
+    | 'state'
+    | 'excludeToolFromMessageHistory'
+  >,
 ): Promise<{ agentState: AgentState; endTurn: boolean; stepNumber: number }> {
+  const {
+    agentState,
+    template,
+    prompt,
+    toolCallParams,
+    system,
+    userId,
+    userInputId,
+    fingerprintId,
+    onResponseChunk,
+    localAgentTemplates,
+    stepsComplete,
+    handleStepsLogChunk,
+    sendAction,
+    logger,
+  } = params
+  let { stepNumber } = params
+
   if (!template.handleSteps) {
     throw new Error('No step handler found for agent template ' + template.id)
   }
@@ -94,10 +118,9 @@ export async function runProgrammaticStep(
       (level: 'debug' | 'info' | 'warn' | 'error') =>
       (data: any, msg?: string) => {
         logger[level](data, msg) // Log to backend
-        sendAction(ws, {
-          type: 'handlesteps-log-chunk',
+        handleStepsLogChunk({
           userInputId,
-          agentId: agentState.agentId,
+          runId: agentState.runId ?? 'undefined',
           level,
           data,
           message: msg,
@@ -119,11 +142,12 @@ export async function runProgrammaticStep(
         initialInput: {
           agentState,
           prompt,
-          params,
+          params: toolCallParams,
           logger: streamingLogger,
         },
         config: undefined, // config
-        logger: streamingLogger, // pass the streaming logger instance for internal use
+        sandboxLogger: streamingLogger, // pass the streaming logger instance for internal use
+        logger,
       })
     } else {
       // Initialize native generator
@@ -156,7 +180,6 @@ export async function runProgrammaticStep(
   const toolCalls: CodebuffToolCall[] = []
   const toolResults: ToolResultPart[] = []
   const state = {
-    ws,
     fingerprintId,
     userId,
     repoId,
@@ -169,10 +192,13 @@ export async function runProgrammaticStep(
       agentType: string
       chunk: string
       prompt?: string
+      forwardToPrompt?: boolean
     }) => {
-      sendAction(ws, {
-        type: 'subagent-response-chunk',
-        ...data,
+      sendAction({
+        action: {
+          type: 'subagent-response-chunk',
+          ...data,
+        },
       })
     },
     agentState: cloneDeep({
@@ -250,34 +276,85 @@ export async function runProgrammaticStep(
           role: 'assistant' as const,
           content: toolCallString,
         })
-        state.sendSubagentChunk({
+        // Optional call handles both top-level and nested agents
+        state.sendSubagentChunk?.({
           userInputId,
           agentId: state.agentState.agentId,
           agentType: state.agentState.agentType!,
           chunk: toolCallString,
+          forwardToPrompt: !state.agentState.parentId,
         })
       }
 
       // Execute the tool synchronously and get the result immediately
+      // Wrap onResponseChunk to add parentAgentId to nested agent events
       await executeToolCall({
+        ...params,
         toolName: toolCall.toolName,
         input: toolCall.input,
         toolCalls,
         toolResults,
         toolResultsToAddAfterStream: [],
         previousToolCallFinished: Promise.resolve(),
-        ws,
         agentTemplate: template,
-        fileContext,
         agentStepId,
-        clientSessionId,
-        userInputId,
         fullResponse: '',
-        onResponseChunk,
         state,
-        userId,
         autoInsertEndStepParam: true,
         excludeToolFromMessageHistory,
+        fromHandleSteps: true,
+        onResponseChunk: (chunk: string | PrintModeEvent) => {
+          if (typeof chunk === 'string') {
+            onResponseChunk(chunk)
+            return
+          }
+
+          // Only add parentAgentId if this programmatic agent has a parent (i.e., it's nested)
+          // This ensures we don't add parentAgentId to top-level spawns
+          if (state.agentState.parentId) {
+            const parentAgentId = state.agentState.agentId
+
+            switch (chunk.type) {
+              case 'subagent_start':
+              case 'subagent_finish':
+                if (!chunk.parentAgentId) {
+                  onResponseChunk({
+                    ...chunk,
+                    parentAgentId,
+                  })
+                  return
+                }
+                break
+              case 'tool_call':
+              case 'tool_result': {
+                if (!chunk.parentAgentId) {
+                  const debugPayload =
+                    chunk.type === 'tool_call'
+                      ? {
+                          eventType: chunk.type,
+                          agentId: chunk.agentId,
+                          parentId: parentAgentId,
+                        }
+                      : {
+                          eventType: chunk.type,
+                          parentId: parentAgentId,
+                        }
+                  onResponseChunk({
+                    ...chunk,
+                    parentAgentId,
+                  })
+                  return
+                }
+                break
+              }
+              default:
+                break
+            }
+          }
+
+          // For other events or top-level spawns, send as-is
+          onResponseChunk(chunk)
+        },
       })
 
       // TODO: Remove messages from state and always use agentState.messageHistory.
@@ -362,7 +439,7 @@ export async function runProgrammaticStep(
     if (endTurn) {
       if (sandbox) {
         // Clean up QuickJS sandbox if execution is complete
-        sandboxManager.removeSandbox({ runId: agentState.runId })
+        sandboxManager.removeSandbox({ runId: agentState.runId, logger })
       }
       delete runIdToGenerator[agentState.runId]
       runIdToStepAll.delete(agentState.runId)

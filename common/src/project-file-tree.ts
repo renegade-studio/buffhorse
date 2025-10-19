@@ -1,4 +1,3 @@
-import fs from 'fs'
 import path from 'path'
 
 import * as ignore from 'ignore'
@@ -7,14 +6,20 @@ import { sortBy } from 'lodash'
 import { DEFAULT_IGNORED_PATHS } from './old-constants'
 import { isValidProjectRoot } from './util/file'
 
+import type { CodebuffFileSystem } from './types/filesystem'
 import type { DirectoryNode, FileTreeNode } from './util/file'
 
 export const DEFAULT_MAX_FILES = 10_000
 
-export function getProjectFileTree(
-  projectRoot: string,
-  { maxFiles = DEFAULT_MAX_FILES }: { maxFiles?: number } = {},
-): FileTreeNode[] {
+export function getProjectFileTree(params: {
+  projectRoot: string
+  maxFiles?: number
+  fs: CodebuffFileSystem
+}): FileTreeNode[] {
+  const withDefaults = { maxFiles: DEFAULT_MAX_FILES, ...params }
+  const { projectRoot, fs } = withDefaults
+  let { maxFiles } = withDefaults
+
   const start = Date.now()
   const defaultIgnore = ignore.default()
   for (const pattern of DEFAULT_IGNORED_PATHS) {
@@ -50,7 +55,7 @@ export function getProjectFileTree(
     const mergedIgnore = ignore
       .default()
       .add(currentIgnore)
-      .add(parseGitignore(fullPath, projectRoot))
+      .add(parseGitignore({ fullDirPath: fullPath, projectRoot, fs }))
 
     try {
       const files = fs.readdirSync(fullPath)
@@ -98,10 +103,61 @@ export function getProjectFileTree(
   return root.children
 }
 
-export function parseGitignore(
-  fullDirPath: string,
-  projectRoot: string,
-): ignore.Ignore {
+function rebaseGitignorePattern(
+  rawPattern: string,
+  relativeDirPath: string,
+): string {
+  // Preserve negation and directory-only flags
+  const isNegated = rawPattern.startsWith('!')
+  let pattern = isNegated ? rawPattern.slice(1) : rawPattern
+
+  const dirOnly = pattern.endsWith('/')
+  // Strip the trailing slash for slash-detection only
+  const core = dirOnly ? pattern.slice(0, -1) : pattern
+
+  const anchored = core.startsWith('/') // anchored to .gitignore dir
+  // Detect if the "meaningful" part (minus optional leading '/' and trailing '/')
+  // contains a slash. If not, git treats it as recursive.
+  const coreNoLead = anchored ? core.slice(1) : core
+  const hasSlash = coreNoLead.includes('/')
+
+  // Build the base (where this .gitignore lives relative to projectRoot)
+  const base = relativeDirPath.replace(/\\/g, '/') // normalize
+
+  let rebased: string
+  if (anchored) {
+    // "/foo" from evals/.gitignore -> "evals/foo"
+    rebased = base ? `${base}/${coreNoLead}` : coreNoLead
+  } else if (!hasSlash) {
+    // "logs" or "logs/" should recurse from evals/: "evals/**/logs[/]"
+    if (base) {
+      rebased = `${base}/**/${coreNoLead}`
+    } else {
+      // At project root already; "logs" stays "logs" to keep recursive semantics
+      rebased = coreNoLead
+    }
+  } else {
+    // "foo/bar" relative to evals/: "evals/foo/bar"
+    rebased = base ? `${base}/${coreNoLead}` : coreNoLead
+  }
+
+  if (dirOnly && !rebased.endsWith('/')) {
+    rebased += '/'
+  }
+
+  // Normalize to forward slashes
+  rebased = rebased.replace(/\\/g, '/')
+
+  return isNegated ? `!${rebased}` : rebased
+}
+
+export function parseGitignore(params: {
+  fullDirPath: string
+  projectRoot: string
+  fs: CodebuffFileSystem
+}): ignore.Ignore {
+  const { fullDirPath, projectRoot, fs } = params
+
   const ig = ignore.default()
   const relativeDirPath = path.relative(projectRoot, fullDirPath)
   const ignoreFiles = [
@@ -111,48 +167,17 @@ export function parseGitignore(
   ]
 
   for (const ignoreFilePath of ignoreFiles) {
-    if (fs.existsSync(ignoreFilePath)) {
-      const ignoreContent = fs.readFileSync(ignoreFilePath, 'utf8')
-      const lines = ignoreContent.split('\n')
-      for (let line of lines) {
-        line = line.trim()
-        if (line === '' || line.startsWith('#')) {
-          continue
-        }
+    if (!fs.existsSync(ignoreFilePath)) continue
 
-        let isNegated = false
-        let pattern = line
-        if (pattern.startsWith('!')) {
-          isNegated = true
-          pattern = pattern.slice(1)
-        }
+    const ignoreContent = fs.readFileSync(ignoreFilePath, 'utf8')
+    const lines = ignoreContent.split('\n')
+    for (let line of lines) {
+      line = line.trim()
+      if (line === '' || line.startsWith('#')) continue
 
-        let finalPattern = pattern
-        // All patterns added to the ignore instance should be relative to the projectRoot.
-        if (pattern.startsWith('/')) {
-          // A pattern starting with '/' is relative to the .gitignore file's directory.
-          // Remove the leading '/' and prepend the relativeDirPath to make it relative to projectRoot.
-          finalPattern = pattern.slice(1)
-          if (relativeDirPath !== '') {
-            finalPattern = path.join(relativeDirPath, finalPattern)
-          }
-        } else {
-          // A pattern not starting with '/' is also relative to the .gitignore file's directory.
-          // Prepend relativeDirPath (if it exists) to make it relative to projectRoot.
-          // If relativeDirPath is empty, the pattern is already relative to projectRoot.
-          if (relativeDirPath !== '') {
-            finalPattern = path.join(relativeDirPath, pattern)
-          }
-          // else: pattern is already relative to projectRoot, so finalPattern remains pattern
-        }
-        finalPattern = finalPattern.replace(/\\/g, '/')
+      const finalPattern = rebaseGitignorePattern(line, relativeDirPath)
 
-        if (isNegated) {
-          ig.add(`!${finalPattern}`)
-        } else {
-          ig.add(finalPattern)
-        }
-      }
+      ig.add(finalPattern)
     }
   }
 
@@ -193,7 +218,13 @@ export function getLastReadFilePaths(
     .map((node) => node.filePath)
 }
 
-export function isFileIgnored(filePath: string, projectRoot: string): boolean {
+export function isFileIgnored(params: {
+  filePath: string
+  projectRoot: string
+  fs: CodebuffFileSystem
+}): boolean {
+  const { filePath, projectRoot, fs } = params
+
   const defaultIgnore = ignore.default()
   for (const pattern of DEFAULT_IGNORED_PATHS) {
     defaultIgnore.add(pattern)
@@ -209,7 +240,9 @@ export function isFileIgnored(filePath: string, projectRoot: string): boolean {
   const mergedIgnore = ignore.default().add(defaultIgnore)
   let currentDir = dirPath
   while (currentDir.startsWith(projectRoot)) {
-    mergedIgnore.add(parseGitignore(currentDir, projectRoot))
+    mergedIgnore.add(
+      parseGitignore({ fullDirPath: currentDir, projectRoot, fs }),
+    )
     currentDir = path.dirname(currentDir)
   }
 

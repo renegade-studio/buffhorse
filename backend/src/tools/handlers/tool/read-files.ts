@@ -1,50 +1,44 @@
 import { getFileReadingUpdates } from '../../../get-file-reading-updates'
 import { renderReadFilesResult } from '../../../util/parse-tool-call-xml'
 
-import type { CodebuffToolHandlerFunction } from '../handler-function-type'
+import type { CodebuffToolHandlerFunction } from '@codebuff/agent-runtime/tools/handlers/handler-function-type'
 import type {
   CodebuffToolCall,
   CodebuffToolOutput,
 } from '@codebuff/common/tools/list'
+import type { ParamsExcluding } from '@codebuff/common/types/function-params'
 import type { Message } from '@codebuff/common/types/messages/codebuff-message'
 import type { ProjectFileContext } from '@codebuff/common/util/file'
-import type { WebSocket } from 'ws'
 
 type ToolName = 'read_files'
-export const handleReadFiles = ((params: {
-  previousToolCallFinished: Promise<void>
-  toolCall: CodebuffToolCall<ToolName>
+export const handleReadFiles = ((
+  params: {
+    previousToolCallFinished: Promise<void>
+    toolCall: CodebuffToolCall<ToolName>
 
-  agentStepId: string
-  clientSessionId: string
-  userInputId: string
-  fileContext: ProjectFileContext
+    userInputId: string
+    fileContext: ProjectFileContext
 
-  state: {
-    ws?: WebSocket
-    userId?: string
-    fingerprintId?: string
-    repoId?: string
-    messages?: Message[]
-  }
-}): {
+    state: {
+      userId?: string
+      fingerprintId?: string
+      repoId?: string
+      messages?: Message[]
+    }
+  } & ParamsExcluding<typeof getFileReadingUpdates, 'requestedFiles'>,
+): {
   result: Promise<CodebuffToolOutput<ToolName>>
   state: {}
 } => {
   const {
     previousToolCallFinished,
     toolCall,
-    agentStepId,
-    clientSessionId,
     userInputId,
     fileContext,
     state,
   } = params
-  const { ws, fingerprintId, userId, repoId, messages } = state
+  const { fingerprintId, userId, repoId, messages } = state
   const { paths } = toolCall.input
-  if (!ws) {
-    throw new Error('Internal error for read_files: Missing WebSocket in state')
-  }
   if (!messages) {
     throw new Error('Internal error for read_files: Missing messages in state')
   }
@@ -60,7 +54,10 @@ export const handleReadFiles = ((params: {
   }
 
   const readFilesResultsPromise = (async () => {
-    const addedFiles = await getFileReadingUpdates(ws, paths)
+    const addedFiles = await getFileReadingUpdates({
+      ...params,
+      requestedFiles: paths,
+    })
 
     return renderReadFilesResult(addedFiles, fileContext.tokenCallers ?? {})
   })()
